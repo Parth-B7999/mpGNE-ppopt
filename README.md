@@ -55,17 +55,6 @@ This script will:
 - `checkpoints_demo/`: (Local) Storage for precomputed offline maps.
 - `demo_single_run.py`: Primary demonstration and benchmarking script.
 
-## Citation
-
-If you use this work in your research, please cite:
-
-```bibtex
-@article{saini2025facet,
-  title={FACET-GNE: Explicit Solutions for Multi-Agent Generalized Nash Equilibrium},
-  author={Saini et al.},
-  year={2025}
-}
-```
 
 ## License
 
