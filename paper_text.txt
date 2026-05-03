@@ -1,0 +1,1680 @@
+Computers and Chemical Engineering 200 (2025) 109169
+
+Contents lists available at ScienceDirect
+
+Computers and Chemical Engineering
+journal homepage: www.elsevier.com/locate/cace
+
+Iteration-free cooperative distributed model predictive control through
+multiparametric programming
+Radhe S.T. Saini a , Parth R. Brahmbhatt b , Styliani Avraamidou b ,∗, Hari S. Ganesh a
+a
+b
+
+,∗
+
+Department of Chemical Engineering, Indian Institute of Technology Gandhinagar, Palaj, Gandhinagar, 382355, Gujarat, India
+Department of Chemical and Biological Engineering, University of Wisconsin-Madison, Madison, WI 53706, USA
+
+ARTICLE
+
+INFO
+
+Keywords:
+Iteration-free
+Cooperative distributed control
+Model predictive control
+Multiparametric programming
+Process control
+
+ABSTRACT
+Cooperative Distributed Model Predictive Control (DiMPC) architecture employs local MPC controllers to
+control different subsystems, exchanging information with each other through an iterative procedure to
+enhance overall control performance compared to the decentralized architecture. However, this method can
+result in high communication between the controllers and computational costs. In this work, the amount
+of information exchanged and the computational costs of DiMPC are reduced significantly by developing
+novel iteration-free solution algorithms based on multiparametric (mp) programming. These algorithms replace
+the iterative procedure with simultaneous solutions of explicit mpDiMPC control law functions. The reduced
+communication among local controllers decreases system latency, which is crucial for real-time control
+applications. The effectiveness of the proposed iteration-free mpDiMPC algorithms is demonstrated through
+comprehensive numerical simulations involving groups of coupled linear subsystems, which are interconnected
+through their inputs and a cooperative plant-wide cost function.
+
+1. Introduction
+Model Predictive Control (MPC) is a widely-implemented optimal
+control technique that emerged from chemical plants, oil refineries,
+and process industries in the late 1980s (Cutler and Ramaker, 1980;
+Qin and Badgwell, 1997). Since its inception, many innovative and
+improved versions of MPC have been developed and deployed for
+various industrial process control systems (Qin and Badgwell, 1997;
+Morari and Lee, 1999). MPC solves an optimal control problem (OCP)
+by utilizing predictive models to calculate a sequence of control inputs
+over a specified future time horizon at each sample time step in
+a receding horizon manner. The OCP typically aims to minimize a
+tracking objective over a future time horizon, subject to input, output,
+equipment, and operational constraints (Rawlings et al., 2017; Maciejowski, 2002). Despite its ability to handle constraints and calculate
+optimized inputs, control of large-scale systems presents significant
+difficulties for MPC (Trodden and Maestre, 2017). As the complexity
+of the plant structure increases, fetching feedback signals and applying
+control signals to farther areas of the plant increases the communication burden. Moreover, the centralized MPC (CMPC) architecture,
+in which the control inputs are calculated by solving the OCP using
+the plantwide objective function at each sample time step, can result
+in large computational overhead. This can impede the ability of the
+controller to perform real-time calculations within one sample time
+
+period determined by process dynamics and operating conditions. Alternatively, decentralized MPC (DeMPC) architecture, with its ability to
+decouple the entire plant into a set of subsystems, reduces complexities.
+However, such decoupling impedes DeMPC from capturing subsystem
+interactions, thereby resulting in sub-optimal control performance and
+instabilities (Cui and Jacobsen, 2002; Siljak, 1991).
+Distributed MPC (DiMPC) architecture serves as a compromise between the centralized and the decentralized control architectures, balancing the relative advantages of both. DiMPC combines the decoupled
+architecture of DeMPC with the ability to capture subsystem interactions of CMPC. DiMPC architecture can be further classified into
+non-cooperative and cooperative variants (Negenborn and Maestre,
+2014; Christofides et al., 2013; Avraamidou and Pistikopoulos, 2017;
+Richards and How, 2007; Venkat et al., 2007). In non-cooperative
+DiMPC, each local controller optimizes its control inputs based on local
+information and the information received from other subsystems without considering the effects of its control actions on the overall system.
+In contrast, in cooperative DiMPC, each local controller optimizes its
+control inputs by considering not only local information but also the
+effects of its control actions on the overall system performance, as
+quantified by a global objective function (Farina and Scattolini, 2012;
+Ferramosca et al., 2013; Stewart et al., 2010). Nevertheless, in both
+
+∗ Corresponding authors.
+
+E-mail addresses: avraamidou@wisc.edu (S. Avraamidou), hariganesh@iitgn.ac.in (H.S. Ganesh).
+https://doi.org/10.1016/j.compchemeng.2025.109169
+Received 20 December 2024; Received in revised form 31 March 2025; Accepted 1 May 2025
+Available online 20 May 2025
+0098-1354/© 2025 Elsevier Ltd. All rights are reserved, including those for text and data mining, AI training, and similar technologies.
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+Nomenclature
+𝐔̄
+𝐕̄ 𝑖
+𝜃̄
+𝜒
+𝜖
+R
+𝟎
+
+𝛺
+𝛷𝑣
+𝜙𝑣
+𝜌𝑖
+𝐔
+𝐮
+𝐔∗
+𝐰
+𝐱
+𝜃
+𝐴
+𝐵
+𝑏
+𝑐
+𝐶𝑅𝑣
+𝐹
+𝐺
+𝐻
+𝐻𝑡
+𝑖, 𝑗
+𝐽
+𝑘
+𝑀
+𝑁𝑝
+𝑛𝑢
+𝑛𝑥
+𝑛𝐶𝑅
+𝑛𝑐
+𝑛𝑢,𝑗
+𝑛𝑥,𝑖
+𝑃
+𝑝
+𝑝𝑚𝑎𝑥
+𝑄
+𝑞
+
+𝑅
+𝑟
+
+Converged control input vector after intermediate
+iterations
+Control input vector of all local model predictive
+controllers except the 𝑖th controller
+Vector of unknown parameters which considers only
+states
+State constraint set
+Error tolerance for convergence
+Set of real numbers
+Zero vector
+Input constraint set
+Terminal state constraint set
+Matrix that define the 𝑣th critical region
+Vector that define the 𝑣th critical region
+Weight for subsystem 𝑖 in the distributed model
+predictive control optimal control problem objective
+Control input decision vector
+Input vector
+Optimal control input decision vector
+Weight for convex combination in the iterative
+process
+State vector
+Vector of unknown (or uncertain) parameters
+System matrix
+Input matrix
+Constraint vector in the multiparametric optimal
+control problem
+Constant term vector in the multiparametric optimal
+control problem objective
+𝑣th Critical region
+Parameter matrix in the multiparametric optimal
+control problem
+Constraint matrix in the multiparametric optimal
+control problem
+Quadratic term matrix in the multiparametric optimal control problem objective
+Linear term matrix in the multiparametric optimal
+control problem objective
+Subsystem indices
+Objective function of model predictive control
+optimal control problem
+Sample time instant
+Number of subsystems (or local model predictive
+controllers)
+Prediction horizon
+Dimension of the input vector
+Dimension of the state vector
+Number of critical regions
+Number of constraints in the multiparametric optimal control problem
+Dimension of the input vector from the 𝑗th local
+model predictive controller (or of the subsystem)
+Dimension of the state vector of the 𝑖th subsystem
+Terminal state weight matrix
+Intermediate iteration index
+Maximum number of intermediate iterations
+State weight matrix
+Sample time step-related index
+
+Input weight matrix
+Intermediate iteration index
+
+non-cooperative and cooperative DiMPCs, the local control inputs are
+exchanged among the local controllers, and the optimal solution is
+found by performing intermediate iterations or solving the OCP several times to ideally converge to the solution at each sample time
+step. Intermediate iterations refer to repetitive optimization (or OCP
+solution) steps performed by each local controller during a sampling
+time to refine its solution based on updated information exchanged
+with other controllers. In cooperative DiMPC, all controllers account
+for the effects of other controllers’ actions and iteratively work toward
+a consensus that is agreed upon by all controllers. Therefore, only cooperative DiMPC results converge to the centralized case (the best case)
+with the increase in the number of intermediate iterations (Stewart
+et al., 2010; Ferramosca et al., 2013). The cooperative DiMPC will be
+the focus of this work, and from now on, ‘DiMPC’ will refer to the
+cooperative case. DiMPC has been successfully applied across diverse
+domains, including energy systems (Wu et al., 2023), vehicle platooning (Feng et al., 2023), building energy management (Langner et al.,
+2024), wind farm control (Lu et al., 2024), and irrigation systems (Zhu
+et al., 2023), showcasing its versatility and effectiveness in optimizing
+complex systems.
+A major drawback of DiMPC, however, is the increased communication load and computational costs resulting from the need to solve multiple OCPs and exchange information among local controllers within
+each sample time period. Hence, in practice, intermediate iterations
+are terminated early or before converging to the solution according
+to termination criteria, resulting in sub-optimal control performance.
+Note that, in DiMPC, the overall system is decomposed into smaller
+coupled subsystems and each local controller solves an OCP with a
+plantwide objective function and local variables as decision variables
+or control inputs. Although the OCPs of local controllers can be solved
+in parallel, the computational costs pertaining to the large number of
+intermediate iterations and the communication load to exchange local
+control inputs through a shared communication network remain high,
+usually at prohibitive levels.
+Two different approaches to overcome the drawback of DiMPC have
+been reported in the literature. The first approach involves improving
+the rate of convergence of the intermediate iterations (Wang and
+Yang, 2022). Fewer intermediate iterations to converge to the solution
+reduces the computational cost. Consequently, even if iterations are
+terminated prematurely due to time constraints, the solution obtained
+at the last iteration is closer to the optimal value, resulting in improved control performance. The second approach involves reducing
+the time of calculation of each intermediate iteration. This is achieved
+by reformulating and solving the DiMPC OCP using multiparametric
+(mp) programming (Pistikopoulos et al., 2002; Bemporad et al., 2002)
+by also considering the information from other local controllers as
+unknown parameters, thereby generating the control law offline as
+affine functions of system parameters. This offline-generated control
+law is expressed as a set of critical regions, each corresponding to
+a distinct region in the parameter space. The offline generated expressions reduce online calculations (at each intermediate iteration)
+to critical region search followed by algebraic function evaluation,
+thereby reducing the computation time of the DiMPC controller (Saini
+et al., 2023; Diangelakis et al., 2016; Kirubakaran et al., 2014). This
+iterative mpDiMPC controller will be referred to as I-mpDiMPC from
+now onward.
+Although I-mpDiMPC helps reduce the computational costs, the
+method may not significantly reduce the communication burden among
+the local controllers. Reducing the communication burden significantly
+2
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+would require the distributed control solution scheme to be iterationfree. A few studies have been performed by restricting the local controllers to exchange information only once per sample time step, thus
+making the control scheme iteration-free. Camponogara et al. (2002)
+studied a DiMPC controller that communicates the previous time step
+control inputs of local controllers among themselves at each sample
+time step. Similar restricted or approximate iteration-free approaches
+were also studied in which each local controller sends its future control
+inputs to the other local controllers at each sampling time (Chen et al.,
+2016; Farina and Scattolini, 2011). In the aforementioned approximate
+iteration-free methods, the local controllers use shared information
+delayed by one sample time step, i.e., the optimal control inputs and
+future predicted control inputs of all the local controllers obtained at
+the previous time step, thereby not guaranteeing global solution and
+stability of DiMPC and I-mpDiMPC.
+The novelty of this work lies in developing state-of-the-art, iterationfree mpDiMPC algorithms to significantly improve the computational
+cost and communication load compared to the DiMPC algorithm. Note
+that the developed iteration-free algorithms, unlike the above-reviewed
+approximate iteration-free methods, yield the exact solution of its
+iterative counterpart in the limiting case but with only one information exchange per sample time. The novel algorithms aim to reduce
+the number of information exchanges between the local controllers,
+thereby offering efficiency gains and potential robustness benefits by
+mitigating the latency issues from communication overhead. The idea
+is to generate mp programming functions for all the local controllers
+offline and then solve them simultaneously, instead of following an
+iterative procedure, to obtain the optimal control inputs at each sample time instant. By exchanging information only once per sample
+period, the proposed algorithms minimize communication delays and
+are less susceptible to the effects of lost or corrupted data during
+communication.
+The remainder of this paper is organized as follows. In Section 2,
+the currently existing DiMPC control architecture and mp programming
+are explained. In Section 3, three different versions of the developed
+iteration-free mpDiMPC algorithms are presented. A set of case studies
+using random plants is defined in Section 4. The results and discussion
+are presented in Section 5 and conclusions are drawn in Section 6.
+
+is generally formulated as:
+min𝐽 (𝐱(𝑘), 𝐔(𝑘))
+𝐔(𝑘)
+
+s.t. 𝐱(𝑙 + 1|𝑘) = 𝐴𝐱(𝑙|𝑘) + 𝐵𝐮(𝑙|𝑘), ∀ 𝑙 ∈ I0∶𝑁𝑝 −1
+𝐱(𝑙|𝑘) ∈ 𝜒 ∀ 𝑙 ∈ I1∶𝑁𝑝
+𝐮(𝑙|𝑘) ∈  ∀ 𝑙 ∈ I0∶𝑁𝑝 −1
+𝐱(0|𝑘) = 𝐱(𝑘)
+where, the matrices 𝑄 and 𝑅 are the weight matrices for states and
+control inputs, respectively, 𝑃 is the terminal state weight matrix, and
+𝑁𝑝 is the prediction horizon. 𝐔(𝑘) = [𝐮(0|𝑘), 𝐮(1|𝑘), … , 𝐮(𝑁𝑝 − 1|𝑘)] is
+the control input decision variable vector, where 𝑗|𝑘 represents 𝑗 time
+steps ahead prediction from the current time step 𝑘. 𝜒, 𝛺, and  are
+the bounding sets for the state vector, terminal state vector, and control
+input vector, respectively. The index 𝑙 represents a specific time step
+within the prediction horizon, ranging from 𝑙 = 0 (current time step) to
+𝑙 = 𝑁𝑝 −1 (end of the prediction horizon). Solving equation (3) results in
+the optimal decision vector 𝐔∗ (𝑘), among which, the first control input
+𝐮∗ (𝑘) (= 𝐮(0|𝑘)) is implemented in the system. The aforementioned
+procedure is repeated and the OCP is solved again at the next sample
+time instant 𝑘 + 1 using the new state information vector 𝐱(𝑘 + 1).
+2.2. mpMPC
+The standard MPC described in Section 2.1 is also referred to as
+online MPC because the OCP is solved at each sample time step 𝑘 to obtain the optimized control inputs. The same results can be obtained by
+determining the explicit expressions of the control law offline through
+the mp programming approach, reducing online calculations to point
+location and function evaluation. Using the state-space model of the
+system given by Eq. (1), the future states can be expressed as a function
+of the current state 𝐱(𝑘) and future control inputs as:
+𝐱(𝑙 + 1|𝑘) = 𝐴𝑙+1 𝐱(𝑘) +
+
+𝐴𝑞 𝐵𝐮(𝑙 − 𝑞|𝑘)
+
+(4)
+
+where, 𝑞 is the sample time step-related index. In the standard MPC
+OCP given by Eq. (3), the state vector 𝐱(𝑘) is usually the only uncertainty (unknown parameter) which becomes known online at each
+sample time instant. However, variables such as previous control input
+values, measured output data, and varying set points (in case the set
+points have to be varied during operation) can also be treated as
+unknown parameters if they are only made available online during the
+controller’s deployment. These values, while measurable or provided
+in real-time, may not be known offline or before the closed-loop
+operation, making them dynamic inputs to the control system. Defining
+the set of the unknown parameters (or parametric variables) as 𝜃 vector
+(𝜃 = 𝐱(𝑘)) and substituting Eq. (4) in Eq. (3) to reformulate the OCP
+into the following:
+
+This section provides an overview of the formulation and solution
+methods for MPC and DiMPC and their mp programming versions,
+mpMPC and I-mpDiMPC, respectively.
+Consider the plant dynamics of a system given by:
+
+R 𝑛𝑥
+
+𝑙
+∑
+𝑞=0
+
+2. Background on MPC
+
+(1)
+
+𝐱(𝑘 + 1) = 𝐴𝐱(𝑘) + 𝐵𝐮(𝑘)
+
+(3)
+
+𝐱(𝑁𝑝 |𝑘) ∈ 𝛺
+
+R𝑛𝑢
+
+where, 𝐱 ∈
+is the state vector, 𝐮 ∈
+is the input vector,
+𝐴 ∈ R𝑛𝑥 ×𝑛𝑥 is the system matrix, 𝐵 ∈ R𝑛𝑥 ×𝑛𝑢 is the input matrix, and k
+is the sample time instant.
+
+1
+min 𝐔𝑇 𝐻𝐔 + (𝜃 𝑇 𝐻𝑡 + 𝑐)𝐔
+𝐔 2
+s.t. 𝐺𝐔 ≤ 𝑏 + 𝐹 𝜃
+
+(5)
+
+where, 𝐻 ∈ R𝑛𝑢 ×𝑛𝑢 , 𝐻𝑡 ∈ R𝑛𝑥 ×𝑛𝑢 , 𝑐 ∈ R𝑛𝑢 , 𝐺 ∈ R𝑛𝑐 ×𝑛𝑢 , 𝑏 ∈ R𝑛𝑐 , 𝐹 ∈
+R𝑛𝑐 ×𝑛𝑥 , and 𝑛𝑐 is the number of constrains. The problem can be solved
+through mp programming to express the optimal control inputs as explicit affine functions of vector 𝜃, which remain both valid and optimal
+in a specific polyhedral space or critical region. The explicit (or mp
+programming) solution to Eq. (5) can be expressed mathematically as:
+
+2.1. MPC
+In standard or online MPC, a single OCP whose decision variables
+represent the future control inputs of the plant is solved at each sample
+time step. The OCP with the objective function given by:
+{ 𝑁𝑝 −1[
+]
+∑ 1
+1
+𝐽 (𝐱(𝑘), 𝐔(𝑘)) =
+𝐱𝑇 (𝑗|𝑘)𝑄𝐱(𝑗|𝑘) + 𝐮𝑇 (𝑗|𝑘)𝑅𝐮(𝑗|𝑘)
+2
+2
+𝑗=0
+(2)
+}
+1 𝑇
++ 𝐱 (𝑁𝑝 |𝑘)𝑃 𝐱(𝑁𝑝 |𝑘)
+2
+
+𝐔∗ = 𝑓 𝑣 (𝜃) if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃 ≤ 𝜙𝑣
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅
+
+(6)
+
+where, 𝑓 represents the affine function defined for each critical region
+𝑣 with 𝛷 and 𝜙 as the corresponding inequality matrices and 𝑛𝐶𝑅 represents the total number of critical regions. During online deployment,
+3
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+at a given time instant 𝑘, with the availability of 𝜃, the critical region
+𝐶𝑅𝑣∗ which satisfies 𝛷𝑣∗ 𝜃 ≤ 𝜙𝑣∗ is identified and the corresponding
+function 𝑓 𝑣∗ (𝜃) is evaluated to obtain the optimal control input vector
+𝐔∗ (𝑘). The first element in 𝐔∗ (𝑘), i.e., 𝐮∗ (𝑘) (= 𝐮(0|𝑘)), is implemented
+in the system. The aforementioned procedure is repeated and region
+search followed by function evaluation is performed again at the next
+time instant 𝑘 + 1, using the new information of the vector 𝜃. Readers
+are encouraged to refer to the PAROC framework (Pistikopoulos et al.,
+2015) for a more detailed explanation of developing mpMPC control
+laws offline.
+
+where, 𝜌𝑖 > 0 is the relative weight and 𝐔(𝑘) = [𝐔1 (𝑘), 𝐔2 (𝑘), … , 𝐔𝑀 (𝑘)].
+This formulation assumes a cooperative plant-wide cost function involving coupled linear subsystems that share their control inputs and
+objectives. This cooperation is essential for achieving centralized-like
+performance in the limiting case in the proposed distributed MPC
+frameworks.
+Let 𝑝 be any positive integer representing an intermediate iteration. At any time step k, the OCP solved by every 𝑖th controller at
+intermediate iteration 𝑝 is:
+𝑖(𝑝) = min 𝐽 (𝐱(𝑘), 𝐔(𝑘))
+(𝑝)
+
+𝐔𝑖 (𝑘)
+
+2.3. DiMPC
+
+s.t. 𝐱(𝑙 + 1|𝑘) = 𝐴𝐱(𝑙|𝑘) +
+In DiMPC, the plant is decomposed into a number of subsystems,
+wherein the local subsystem model also considers the interaction dynamics among the subsystems. An array of local controllers calculates
+the local control inputs. The local controllers exchange information
+with each other and iteratively solve a plant-wide objective function to
+determine the control inputs. At each control time step within the overall time span of closed-loop operation, the control inputs of the local
+controllers are calculated through an iterative procedure by performing
+intermediate iterations. At each intermediate iteration, every local
+controller calculates its (intermediate) control inputs based on the local
+information and the latest (intermediate) control input information
+received from other local controllers. At the next intermediate iteration
+step, the local controller typically uses the latest (intermediate) control
+inputs of the other local controllers to calculate the (intermediate)
+control inputs. The iterative procedure is repeated until a pre-defined
+termination criterion is reached. Upon termination, the (intermediate)
+control input of the latest intermediate iteration is implemented in the
+plant as the control input at the particular sample time step. At the
+next sample time step, the control inputs implemented in the plant are
+treated as the latest (intermediate) control inputs to start the iterative
+procedure to determine the control inputs of all the local controllers.
+Consider the dynamics of the 𝑖th subsystem among a network of 𝑀
+subsystems given by:
+𝐱𝑖 (𝑘 + 1) = 𝐴𝑖 𝐱𝑖 (𝑘) +
+
+𝑀
+∑
+
+𝐵𝑖,𝑗 𝐮𝑗 (𝑘)
+
+∀𝑙 ∈ I0∶𝑁𝑝 −1
+𝐱𝑡 (𝑙|𝑘) ∈ 𝜒𝑡 ∀ 𝑙 ∈ I1∶𝑁𝑝 , ∀ 𝑡 ∈ I1∶𝑀
+
+𝐵𝑗 𝐮𝑗 (𝑘)
+
+𝐮𝑖 (𝑙|𝑘) ∈ 𝑖 ∀ 𝑙 ∈ I0∶𝑁𝑝 −1
+𝐱(0|𝑘) = 𝐱(𝑘),
+𝐔𝑗 (𝑘) = 𝐔(𝑝−1)
+(𝑘), ∀ 𝑗 ∈ I1∶𝑀∖𝑖
+𝑗
+where, I1∶𝑀∖𝑖 represents the set of all 𝑀 local controllers except the
+𝑖th controller, i.e., {1, 2, … , 𝑖 − 1, 𝑖 + 1, … , 𝑀}. During the optimization
+process, the control inputs of other local controllers 𝐔𝑗 (𝑘), ∀ 𝑗 ∈
+I1∶𝑀∖𝑖 remain unchanged, as ensured by the last equality condition in
+the aforementioned OCP. Once the optimal control inputs by all 𝑀
+controllers at 𝑝th intermediate iteration is obtained, the next iterate is
+calculated as a convex combination of the current and previous iterate
+as follows:
+𝐔(𝑝) (𝑘) = 𝐰𝐔(𝑝−1) (𝑘) + (1 − 𝐰)𝐔(𝑝) (𝑘)
+
+(7)
+
+𝐔(0) (𝑘) =
+
+...,
+
+(8)
+
+}
+
+𝐮𝑀 (1|𝑘 − 1), 𝐮𝑀 (2|𝑘 − 1), … , 𝐮𝑀 (𝑁𝑝 − 1|𝑘 − 1), 𝟎1×𝑛𝑢,𝑀 ,
+(13)
+The warm start is assembled using the optimal solution found at the
+previous sample time step 𝑘 − 1. At any 𝑘th sample time step, the
+DiMPC algorithm incorporated with Wegenstein’s approach is described
+in Algorithm 1. At any 𝑘th sample time step, a warm start vector 𝐔̄ (1)
+is assembled according to Eq. (13). At each intermediate iteration, the
+OCP of each local controller defined in Eq. (11) is solved. The weight
+vector 𝐰 is modified based on optimal results from current and previous
+intermediate iterations. The optimal control inputs at each intermediate
+iteration 𝑝 are saturated between control limits. Once the convergence
+criteria are satisfied, the intermediate iterations are terminated and the
+control input obtained at the latest 𝑝th iteration is implemented in the
+system.
+
+1
++ 𝐱𝑖𝑇 (𝑁𝑝 |𝑘)𝑃𝑖 𝐱𝑖 (𝑁𝑝 |𝑘)
+2
+where, 𝐔𝑖 (𝑘) = [𝐮𝑖 (0|𝑘), 𝐮𝑖 (1|𝑘), … , 𝐮𝑖 (𝑁𝑝 − 1|𝑘)] is the predicted input
+trajectory. The plantwide objective function can be accumulated as:
+𝜌𝑖 𝐽𝑖 (𝐱𝑖 (𝑘), 𝐔𝑖 (𝑘))
+
+𝐮1 (1|𝑘 − 1), 𝐮1 (2|𝑘 − 1), … , 𝐮1 (𝑁𝑝 − 1|𝑘 − 1), 𝟎1×𝑛𝑢,1 ,
+𝐮2 (1|𝑘 − 1), 𝐮2 (2|𝑘 − 1), … , 𝐮2 (𝑁𝑝 − 1|𝑘 − 1), 𝟎1×𝑛𝑢,2 ,
+
+∑𝑀
+where, 𝐱(𝑘) = [𝐱1 (𝑘), 𝐱2 (𝑘), … , 𝐱𝑀 (𝑘)] ∈ R𝑛𝑥 , 𝑛𝑥 =
+𝑖=1 𝑛𝑥,𝑖 , 𝐴 =
+𝑇
+𝑇
+𝑇
+𝑇
+𝑑𝑖𝑎𝑔(𝐴1 , 𝐴2 , … , 𝐴𝑀 ), and 𝐵𝑗 = [𝐵1,𝑗 , 𝐵2,𝑗 , … , 𝐵𝑀,𝑗 ] , where, 𝑑𝑖𝑎𝑔()
+represents a block-diagonal matrix. Assume a local cost function of the
+𝑖th local controller given by:
+]
+𝑁𝑝 −1[
+∑ 1
+1
+𝐽𝑖 (𝐱𝑖 (𝑘), 𝐔𝑖 (𝑘)) =
+𝐱𝑖𝑇 (𝑗|𝑘)𝑄𝑖 𝐱𝑖 (𝑗|𝑘) + 𝐮𝑇𝑖 (𝑗|𝑘)𝑅𝑖 𝐮𝑖 (𝑗|𝑘)
+2
+2
+(9)
+𝑗=0
+
+𝑀
+∑
+
+(12)
+
+The values of weight 𝐰 dictate the convergence abilities of the iterative
+process. An adaptive algorithm to accelerate the convergence process
+as described in Wegstein (1958) is used in this study. Essentially, the
+method tries to manipulate 𝐰 at each iterative step using the results of
+the previous time step. Note that 𝐰 = [𝑤1 , 𝑤2 , … , 𝑤𝑖 , … , 𝑤𝑚 ] contains
+individual weights for each subsystem 𝑖 ∈ 1, 2, … , 𝑀, ensuring that
+for each subsystem, 𝑤𝑖 and its complement (1 − 𝑤𝑖 ) sum to 1, where
+𝑤𝑖 ∈ [0, 1]. At the 1st intermediate iteration, a warm start is used as
+the initial condition as defined below:
+{
+
+𝑗=1
+
+𝐽 (𝐱(𝑘), 𝐔(𝑘)) =
+
+(11)
+
+𝐱𝑡 (𝑁𝑝 |𝑘) ∈ 𝛺𝑡 ∀ 𝑡 ∈ I1∶𝑀
+
+where, 𝐱𝑖 ∈ R𝑛𝑥,𝑖 , 𝐴𝑖 ∈ R𝑛𝑥,𝑖 ×𝑛𝑥,𝑖 , 𝐵𝑖,𝑗 ∈ R𝑛𝑥,𝑖 ×𝑛𝑢,𝑗 , and 𝐮𝑗 ∈ R𝑛𝑢,𝑗 .
+The assumptions in this work pertain to the plant dynamics, where
+coupling between subsystems is assumed to occur only through control
+actions 𝐮𝑗 and not states 𝐱𝑖 . This simplification is adopted to streamline
+the presentation of the iteration-free mpDiMPC methods but can be
+extended to handle coupling involving both states and control actions,
+if required, for more complex applications. The overall system can be
+assembled as:
+𝐱(𝑘 + 1) = 𝐴𝐱(𝑘) +
+
+𝐵𝑗 𝐮𝑗 (𝑙|𝑘),
+
+𝑗=1
+
+𝑗=1
+
+𝑀
+∑
+
+𝑀
+∑
+
+(10)
+
+𝑖=1
+
+4
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+Algorithm 1 DiMPC (or I-mpDiMPC) algorithm applying the Wegenstein’s approach for accelerated convergence
+
+where, 𝑓𝑖 is an affine function evaluated for each critical region of every
+𝑖th OCP. The algorithm for this approach is similar to that of Algorithm
+1 for DiMPC or I-mpDiMPC, except that the optimal control input for
+every 𝑖th controller is calculated from the offline-determined explicit
+solutions.
+
+(1)
+
+Require: U(𝑘 − 1), x(𝑘), 𝜖 > 0, 𝑝𝑚𝑎𝑥 ≥ 0 ̄
+U = U0 (𝑘) ⊳ Assemble using
+U(𝑘 − 1) according to eq. (13)
+𝑟=1
+for 𝑝 = 1 to 𝑝𝑚𝑎𝑥 do
+for 𝑖 = 1 to 𝑀 do
+⊳ For DiMPC, solve eq. (11) with arguments x(𝑘), and
+̄ (𝑝) received from other
+the current control input information U
+subsystems
+⊳ For I-mpDiMPC, use pre-computed solutions given by
+eq. (16)
+U(𝑝+1) = arg(𝑖(𝑝) )
+end for
+if 𝑟 = 1 then
+̄ (𝑝−1) = U
+̄ (𝑝)
+U
+(𝑝)
+(𝑝+1)
+̄
+U =U
+
+3. Novel iteration-free mpDiMPC algorithms
+To make the aforementioned I-mpDiMPC algorithm iteration-free,
+it is further developed by employing a procedure that simultaneously
+solves the offline-generated control law expressions of the local controllers during online deployment. In an mp programming solution of
+an MPC OCP, the control inputs are linear functions of variables that
+change online at each time step, such as system states, within critical
+region spaces. This structure can be leveraged by formulating a system
+of linear equations for different combinations of critical regions. The
+simultaneous solution of this system of linear equations eliminates the
+need for the critical region search procedure during online deployment,
+which is typically performed at every sample time for conventional
+mpMPC and intermediate iteration for the I-mpDiMPC. As a result,
+the method requires only one instant of information exchange among
+the local controllers of mpDiMPC at every sample time, making it
+iteration-free (without any approximations). Three different iterationfree mpDiMPC algorithms, namely, IF-mpDiMPC, IF-mpDiMPC-V1.5,
+and IF-mpDiMPC-V2, are developed, and their computational and control performance is studied. The iteration-free methods enable the
+mpDiMPC controllers to calculate the control inputs with minimal communication in the distributed control network, improving the resilience
+of the overall system to issues arising from excessive communication.
+
+𝑟=2
+else
+⊳ Element wise vector manipulations
+a = (U(𝑝+1) −U(𝑝) )∕( ̄U(𝑝) − ̄U(𝑝−1) )
+w = a∕(a−1)
+w = max(min(w, 𝑤𝑚𝑎𝑥 ), 𝑤𝑚𝑖𝑛 )
+̄ (𝑝+1) = wU
+̄ (𝑝) + (1 − w)U(𝑝+1)
+U
+(𝑝−1)
+(𝑝)
+̄
+̄
+U
+=U
+̄ (𝑝) = U
+̄ (𝑝+1)
+U
+end if
+U(𝑝) = U(𝑝+1)
+̄ (𝑝) = max(min(U
+̄ (𝑝) , U ), U )
+U
+𝑚𝑎𝑥
+𝑚𝑖𝑛
+(𝑝)
+̄
+Transmit U to all interconnected systems
+̄ (𝑝) − U
+̄ (𝑝−1) | < 𝜖) then
+if all(|U
+break out of for loop
+end if
+𝑝=𝑝+1
+end for
+̄ (𝑝) ⊳ Optimal or best possible control solution at time step
+U∗ (𝑘) = U
+k
+
+3.1. IF-mpDiMPC
+In the first method, i.e., IF-mpDiMPC, the optimal control inputs at
+each sample time step are determined by simultaneously solving the
+explicitly generated affine functions of the control law for all the local
+controllers in the network. The developed algorithm is explained in
+detail in this subsection.
+For a local IF-mpDiMPC controller 𝑖, among other unknown parameters, 𝜃𝑖 will also contain control input information of all other local
+controllers. Splitting the parametric vector 𝜃𝑖 as:
+[
+]
+𝜃𝑖 = 𝐱(𝑘) , 𝐔1 , 𝐔2 , … , 𝐔𝑖−1 , 𝐔𝑖+1 , … 𝐔𝑀
+(17)
+⏟⏟⏟ ⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟
+
+2.4. I-mpDiMPC
+Similar to the solution method described in Section 2.3, an mp
+programming version of DiMPC can be developed as follows. Using the
+overall system model (see Eq. (8)), all future states can be expressed as
+a function of current state 𝐱(𝑘) and future control actions as:
+
+∑
+𝑙
+
+𝐱(𝑙 + 1|𝑘) = 𝐴𝑙+1 𝐱(𝑘) +
+
+𝑞=0
+
+𝐴𝑞
+
+𝑀
+∑
+
+𝐵𝑗 𝐮𝑗 (𝑙 − 𝑞|𝑘)
+
+𝜃̄
+
+where, 𝐕̄ 𝑖 is a subset of 𝐔 that includes the control inputs for all local
+controllers except the 𝑖th one, i.e., [𝐔1 , … , 𝐔𝑖−1 , 𝐔𝑖+1 , … , 𝐔𝑀 ], and 𝜃̄ is
+the remaining unknown parameters. In this study, 𝜃̄ = 𝐱(𝑘). Substituting
+𝜃𝑖 in Eq. (16) yields the expression of the control law given by:
+
+(14)
+
+𝑗=1
+
+̄ 𝐕̄ 𝑖 ) if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃̄ + 𝛷𝑣 𝐕̄ 𝑖 ≤ 𝜙𝑣
+𝐔𝑖 = 𝑓𝑖𝑣 (𝜃,
+𝑖
+𝑖
+𝑖,1
+𝑖,2
+
+For every 𝑖th local controller, control actions of all other local controllers 𝐔𝑗 ∀ 𝑗 ∈ I1∶𝑀∖𝑖 are treated as unknown parameters along with
+the state vector 𝐱(𝑘). Grouping them in a single unknown parametric
+vector as 𝜃𝑖 = [𝐱(𝑘), 𝐔1 , 𝐔2 , … , 𝐔𝑖−1 , 𝐔𝑖+1 , … , 𝐔𝑀 ], substituting Eq. (14)
+in Eq. (11), and rearranging results in:
+𝐔𝑖
+
+1 𝑇
+𝐔 𝐻 𝐔 + (𝜃𝑖𝑇 𝐻𝑡,𝑖 + 𝑐𝑖 )𝐔𝑖
+2 𝑖 𝑖 𝑖
+
+s.t
+
+𝐺𝑖 𝐔𝑖 ≤ 𝑏𝑖 + 𝐹𝑖 𝜃𝑖
+
+𝑖(𝑝) (𝜃𝑖 ) = min
+
+(18)
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,𝑖
+[
+]
+𝑣
+𝛷𝑖,1
+𝟎
+where, 𝛷𝑖𝑣 =
+is a block-diagonal matrix. Similarly, mp
+𝑣
+𝟎
+𝛷𝑖,2
+programming solutions for all the 𝑀 local controllers can be determined and the explicit expressions of the control law can be assembled
+as given below:
+
+(15)
+
+𝑣 𝜃̄ + 𝛷𝑣 𝐕
+̄ ≤ 𝜙𝑣
+𝐔1 = 𝑓1𝑣 ( ̄𝜃, 𝐕̄ 1 ) if 𝐶𝑅𝑣1 ∶ 𝛷1,1
+1
+1,2 1
+1
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,1
+̄ 𝐕̄ 2 ) if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃̄2 + 𝛷𝑣 𝐕̄ 2 ≤ 𝜙𝑣
+𝐔2 = 𝑓2𝑣 (𝜃,
+2
+2,1
+2,2
+2
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,2
+⋮
+𝑣 (𝜃,
+̄ 𝐕̄ 𝑀 ) if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃̄𝑀 + 𝛷𝑣 𝐕̄ 𝑀 ≤ 𝜙𝑣
+𝐔𝑀 = 𝑓𝑀
+𝑀
+𝑀
+𝑀,1
+𝑖,2
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,𝑀
+
+The above problem can be solved through mp programming to determine the optimal control inputs as explicit affine functions of vector
+𝜃𝑖 , which remain both valid and optimal in a specific polyhedral space,
+termed as critical region. The mp programming solution to Eq. (15) is:
+𝑣
+𝑣
+𝑣
+𝑣
+𝐔(𝑝)
+𝑖 = 𝑓𝑖 (𝜃𝑖 ) if 𝐶𝑅𝑖 ∶ 𝛷𝑖 𝜃𝑖 ≤ 𝜙𝑖
+
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,𝑖
+
+𝐕̄ 𝑖
+
+(16)
+5
+
+(19)
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+By considering 𝐔 as 𝐕̄ 𝑖 and 𝐔𝑖 , through appropriate matrix manipulations, the aforementioned equation can be expressed in terms of 𝐔
+as:
+𝐔 = 𝑔 𝑣 ( ̄𝜃) if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃̄1 + 𝛷𝑣 𝐕̄ 1 ≤ 𝜙𝑣
+1
+
+1
+
+1,1
+
+1,2
+
+3.2. IF-mpDiMPC-V1.5
+In the second method, i.e., IF-mpDiMPC-V1.5, to reduce the computation time for IF-mpDiMPC, the number of critical regions that have
+to be considered for simultaneous solution is reduced by performing
+feasibility checks on the inequality constraints of the critical regions.
+The developed algorithm is explained in detail in this subsection.
+Consider the explicit solution of the local controller 1 among all 𝑀
+controllers, i.e., the first equation in Eq. (20):
+
+1
+
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,1
+̄ if 𝐶𝑅𝑣 ∶ 𝛷𝑣 𝜃̄2 + 𝛷𝑣 𝐕̄ 2 ≤ 𝜙𝑣
+𝐔 = 𝑔2𝑣 (𝜃)
+2
+2,1
+2,2
+2
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,2
+⋮
+𝑣 (̄
+𝑣 𝜃̄ + 𝛷𝑣 𝐕
+̄ ≤ 𝜙𝑣
+𝐔 = 𝑔𝑀
+𝜃) if 𝐶𝑅𝑣𝑀 ∶ 𝛷𝑀,1
+𝑀
+𝑀
+𝑖,2 𝑀
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,𝑀
+
+(20)
+
+𝑣 𝜃̄ + 𝛷𝑣 𝐕
+̄ ≤ 𝜙𝑣
+𝐔 = 𝑔1𝑣 ( ̄𝜃) if 𝐶𝑅𝑣1 ∶ 𝛷1,1
+1
+1,2 1
+1
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,1
+
+The affine functions of the control law expressions result in formu∑
+lating 𝑁𝑝 𝑀
+𝑖=1 𝑛𝑢,𝑖 equations to evaluate same number of unknowns
+and therefore can be solved simultaneously (instead of the iterative
+procedure) to yield the final optimal control vector 𝐔∗ (𝑘). Note that
+the unknown parametric vector 𝜃̄ consists of a known state vector that
+is measured or obtained from measured output variables. After all the
+subsystem states are known, a system of linear equations with only
+control inputs as variables given by Eq. (20) can be solved without the
+need to exchange current or previous control inputs, thereby requiring
+only one communication step. Since 𝐱(𝑘) changes at each time step, the
+system of linear equations in Eq. (20) must be solved at every time step
+to determine the optimal control action U, which is a crucial aspect of
+the IF-mpDiMPC method. The pseudo-code to implement IF-mpDiMPC
+is provided in Algorithm 2.
+
+(21)
+
+Representing the expressions of the critical region inequalities as:
+𝑣 𝐕
+̄ 1 ≤ 𝜙𝑣 − 𝛷𝑣 𝜃̄1
+𝐔 = 𝑔1𝑣 ( ̄𝜃) if 𝐶𝑅𝑣1 ∶ 𝛷1,2
+1
+1,1
+∀ 𝑣 = 1, 2, 3, … , 𝑛𝐶𝑅,1
+
+(22)
+
+𝑣 , 𝛷𝑣 , and 𝜙𝑣 are
+the initial formulation of inequality matrices, 𝛷1,1
+1,2
+1
+performed with a feasibility check during the mp programming solution
+development. Now, a subset of available information 𝜃̄1 can be used to
+determine feasibility such that the inequality constraints corresponding
+to a critical region are satisfied. Consequently, this feasibility check
+would ensure that the optimal solution might lie in this critical region.
+On the other hand, if the 𝜃̄1 value violates the inequality constraints
+corresponding to a critical region, then this would suggest that the
+optimal solution will not lie in the critical region. This initial check
+can help reduce the possible number of critical regions to 𝑛∗𝐶𝑅,1 , less
+than or equal to 𝑛𝐶𝑅,1 , that have to be accounted for in simultaneous
+solution for IF-mpDiMPC to obtain the optimal control inputs.
+The aforementioned procedure is then followed for all the explicitly
+generated expressions through mp programming of the control law for
+all 𝑀 local controllers. For each local controller, the subset of the
+feasible critical regions 𝑛∗𝐶𝑅,𝑖 ≤ 𝑛𝐶𝑅,𝑖 , ∀𝑖 ∈ 1, 2, 3, … , 𝑀 are identified.
+Consequently, the number of times the simultaneous equations that
+should be solved for the overall system reduces to:
+
+Algorithm 2 IF-mpDiMPC algorithm
+Require: x(𝑘)
+𝜃̄ = x(𝑘)
+for 𝐿1 = 1 𝑡𝑜 𝑛𝐶𝑅,1 do ⊳ 𝐿1 , ..., 𝐿𝑀 are indices of critical regions for
+subsystems 1 through 𝑀
+for 𝐿2 = 1 𝑡𝑜 𝑛𝐶𝑅,2 do
+.
+for 𝐿𝑖 = 1 𝑡𝑜 𝑛𝐶𝑅,𝑖 do
+.
+for 𝐿𝑀 = 1 𝑡𝑜 𝑛𝐶𝑅,𝑀 do
+Simultaneously solve the equations,
+𝐿 ̄
+𝐿 ̄
+𝐿 ̄
+𝐿
+̄
+U = 𝑔1 1 (𝜃),
+U = 𝑔2 2 (𝜃),
+..., U = 𝑔𝑖 𝑖 (𝜃),
+..., U = 𝑔𝑀𝑀 (𝜃)
+end for
+⊳ 𝑀 𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 𝑖𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 2𝑛𝑑 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+end for
+⊳ 1𝑠𝑡 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+U∗ (𝑘) = U
+⊳ Optimal control solution at time step k
+
+𝑛∗𝐶𝑅,1 × 𝑛∗𝐶𝑅,2 × ⋯ × 𝑛∗𝐶𝑅,𝑀 ≤ 𝑛𝐶𝑅,1 × 𝑛𝐶𝑅,2 × ⋯ × 𝑛𝐶𝑅,𝑀
+
+(23)
+
+The check for feasibility for the set of inequalities in the 𝑣th critical
+region for each 𝑖th controller can be found by solving the following
+linear programming (LP) problem with a dummy objective:
+ℎ∗1,𝑣 = min 0
+𝐕̄ 1
+
+(24)
+
+𝑣 ̄
+𝑣 ̄
+s.t. 𝛷1,2
+𝐕1 ≤ 𝜙𝑣1 − 𝛷1,1
+𝜃1
+
+∑
+Note that IF-mpDiMPC-V1.5 requires solving 𝑀
+𝑖=1 𝑛CR,𝑖 LPs of relatively
+smaller size for feasibility checks based on Eq. (24), which adds to the
+computational costs. However, these LPs are computationally inexpensive and enable the early elimination of infeasible regions. As a result,
+the total computation cost is reduced compared to solving the original IF-mpDiMPC formulation directly. The psuedocode to implement
+IF-mpDiMPC-V1.5 is provided in Algorithm 3.
+
+Solving the affine functions simultaneously for all possible combinations of critical region spaces results in identifying a single combination
+that offers the solution to the system of linear equations. This solution
+corresponds to the optimal control input vector. In cases where multiple feasible solutions exist (because of overlapping critical regions),
+i.e., more than one combination satisfies the system of linear equations,
+the solution that minimizes the objective function in the OCP (refer
+to Eq. (15)) is selected as the optimal choice. An important consideration for the practical implementation of the proposed IF-mpDiMPC
+approach is the impact of the number of critical regions on the computational complexity of the simultaneous solution step. Specifically,
+the simultaneous equations need to be solved 𝑛𝐶𝑅,1 × 𝑛𝐶𝑅,2 × ⋯ × 𝑛𝐶𝑅,𝑀
+times. The active critical region combination is determined conclusively
+by solving the simultaneous equations for all possible combinations,
+which can be computationally expensive. Hence, the IF-mpDiMPC-V1.5
+and IF-mpDiMPC-V2 algorithms are developed to further improve the
+computational speed of the IF-mpDiMPC algorithm. The approach is
+to reduce the possible combinations of critical regions or the number
+of times the simultaneous solutions need to be performed on a set of
+critical regions online at a given sample time step.
+
+3.3. IF-mpDiMPC-V2
+In the third method, i.e., IF-mpDiMPC-V2, the computational costs
+of IF-mpDiMPC-V1.5 are further reduced by exploring only the nearest
+neighbors of the optimal critical region solution of the previous sample time step. The developed algorithm is explained in detail in this
+subsection.
+In practice, the plant states change gradually. Hence, gradual movements in control inputs would be sufficient to steer the plant to its
+desired operating condition. Therefore, the control input solution will
+likely lie in and around the optimal critical region identified at the
+previous sample time step.
+Assume the control input solution at (𝑘 − 1)th sample time step is
+𝐔∗ (𝑘−1) = [𝐔1 (𝑘−1), 𝐔2 (𝑘−1), … , 𝐔𝑀 (𝑘−1)]. For the 𝑖th local controller
+6
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+Algorithm 3 IF-mpDiMPC-V1.5 algorithm
+
+Algorithm 4 IF-mpDiMPC-V2 algorithm
+
+Require: U(𝑘 − 1), x(𝑘) 𝜃̄ = x(𝑘)
+⊳ Accumulate 𝑛∗𝐶𝑅,𝑖 for all i local controllers
+for 𝑖 = 1 𝑡𝑜 𝑀 do ⊳ Outer loop to generate feasible sets for M local
+controllers
+𝑁𝐶𝑅,𝑖 = {} ⊳ An empty set to store indices of all feasible critical
+regions
+for 𝐼𝑖 = 1 𝑡𝑜 𝑛𝐶𝑅,𝑖 do
+Formulate LP problem as in eq. (24)
+if ℎ∗1,𝐼𝑖 is non empty then
+Append 𝐼𝑖 to 𝑁𝐶𝑅,𝑖
+end if
+end for
+end for
+for 𝐿1 in 𝑁𝐶𝑅,1 do
+⊳ 𝐿1 , ..., 𝐿𝑀 are indices of critical regions for
+subsystems 1 through 𝑀
+for 𝐿2 in 𝑁𝐶𝑅,2 do
+.
+for 𝐿𝑖 in 𝑁𝐶𝑅,𝑖 do
+.
+for 𝐿𝑀 in 𝑁𝐶𝑅,𝑀 do
+Simultaneously solve the equations,
+𝐿 ̄
+𝐿 ̄
+𝐿 ̄
+𝐿
+̄
+U∗ = 𝑔1 1 (𝜃),
+U∗ = 𝑔2 2 (𝜃),
+..., U∗ = 𝑔𝑖 𝑖 (𝜃),
+..., U∗ = 𝑔𝑀𝑀 (𝜃)
+end for
+⊳ 𝑀 𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 𝑖𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 2𝑛𝑑 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+end for
+⊳ 1𝑠𝑡 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+U∗ (𝑘) = U∗
+⊳ Optimal control solution at time step k
+
+Require: U(𝑘 − 1), x(𝑘) do
+for 𝑖 = 1 𝑡𝑜 𝑀 do ⊳ Outer loop to generate feasible sets for M local
+controllers
+𝑁𝐶𝑅,𝑖 = {}
+⊳ An empty set to store indices of all feasible
+critical regions
+[
+Form Unknown parametric vector 𝜃𝑖 = x(𝑘), U1 (𝑘−1), ..., U𝑖−1 (𝑘−
+]
+1), U𝑖+1 (𝑘 − 1), ..., U𝑀 (𝑘 − 1)
+Perform Point Location algorithm and find the optimal critical region 𝑣1 using explict solution of 1𝑠𝑡 local controller and the
+unknown parametric vector 𝜃1 .
+Form the feasible set 𝑁𝐶𝑅,𝑖 using 𝑣𝑖 and its nearest boundaries.
+Thus, 𝑁𝐶𝑅,𝑖 = {𝑣𝑖 , boundaries of𝑣𝑖 }
+end for
+end do
+for 𝐿1 in 𝑁𝐶𝑅,1 do
+⊳ 𝐿1 , ..., 𝐿𝑀 are indices of critical regions for
+subsystems 1 through 𝑀
+for 𝐿2 in 𝑁𝐶𝑅,2 do
+.
+for 𝐿𝑖 in 𝑁𝐶𝑅,𝑖 do
+.
+for 𝐿𝑀 in 𝑁𝐶𝑅,𝑀 do
+Simultaneously solve the equations,
+𝐿
+𝐿
+𝐿
+𝐿
+U = 𝑔1 1 ( ̄𝜃), U = 𝑔2 2 ( ̄𝜃), ..., U = 𝑔𝑖 𝑖 ( ̄𝜃), ..., U = 𝑔𝑀𝑀 ( ̄𝜃)
+end for
+⊳ 𝑀 𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 𝑖𝑡ℎ 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+.
+end for
+⊳ 2𝑛𝑑 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+end for
+⊳ 1𝑠𝑡 𝑓 𝑜𝑟 𝑙𝑜𝑜𝑝
+if U not found then
+Revert to iterative I-mpDiMPC approach (Algorithm 1) to obtain U
+end if
+U∗ (𝑘) = U
+⊳ Optimal control solution at time step k
+
+at sample time step 𝑘, an unknown parametric vector is formed using
+current state information 𝐱(𝑘) given by:
+[
+𝜃𝑖 = 𝐱(𝑘), 𝐔1 (𝑘 − 1), 𝐔2 (𝑘 − 1), … , 𝐔𝑖−1 (𝑘 − 1),
+]
+(25)
+𝐔𝑖+1 (𝑘 − 1), .., 𝐔𝑀 (𝑘 − 1)
+
+The mp programming explicit expressions of the control law for all
+local controllers are an exact reformulation in terms of the states 𝐱(𝑘)
+and inputs. Note that this property is not particular to the mpDiMPC
+methods but to mpMPC in general (Bemporad et al., 2002; Pappas et al.,
+2021). These expressions are the same for both the I-mpDiMPC and IFmpDiMPC algorithms. However, the IF-mpDiMPC algorithms solve the
+expressions simultaneously to determine the control inputs instead of
+employing a critical region search procedure during online deployment
+at each sample time. This does not alter the underlying solution space
+or the optimal solutions obtained. Consequently, the stability properties
+and theoretical foundations established for the iterative algorithms also
+apply to the IF-mpDiMPC approaches. The stability in this context refers
+to closed-loop stability based on Lyapunov constraints, as established in
+prior works such as Wang and Yang (2022) and Stewart et al. (2010),
+which provide the theoretical foundation for the developed algorithms.
+Moreover, evaluating the rate of change of the system states based on
+input bounds could significantly reduce the number of critical regions
+explored, thereby minimizing the number of simultaneous equations in
+the IF-mpDiMPCV2 method. This will be an important focus of future
+work.
+
+Based on the unknown parametric vector 𝜃𝑖 , a search for the feasible
+and valid critical region is conducted and the optimal critical region for
+𝑖th local controller is identified. In the next sample time step 𝑘 + 1, a
+set consisting of this critical region and its nearest neighbors is formed
+and considered for the simultaneous solution for the control inputs
+calculation. Note that this set would be smaller than the set considered
+for the simultaneous solution, not only in IF-mpDiMPC but also in IFmpDiMPC-V1.5. The pseudo-code for the IF-mpDiMPC-V2 algorithm is
+provided in Algorithm 4.
+As stated earlier, the IF-mpDiMPC-V2 method involves solving a
+system of linear equations derived from a reduced set of neighboring
+critical regions from that of the previous time step critical region. If
+the control input 𝐔 does not fall within the space defined by these
+neighboring critical regions, there will be no corresponding linear
+equations to solve and hence will not yield a solution. This situation
+arises because the reduced set of critical regions may not encompass
+the optimal feasible solution for 𝐔, particularly when the state lies
+outside these predefined regions at the current sample time. In this
+case, the algorithm reverts to the (iterative) I-mpDiMPC method (see
+Section 2.4). This ensures convergence to the optimal solution or early
+termination at the latest sub-optimal solution if the sample time is
+completed, bounding the worst-case execution time of IF-mpDiMPCV2 by that of the time needed to both attempt IF-mpDiMPC-V2 and
+arrive at a solution through I-mpDiMPC if the former fails to find the
+solution. Future research could explore alternative fallback strategies
+for large-scale systems. Fig. 1 describes the offline and online solution
+procedures for the developed IF-mpDiMPC, IF-mpDiMPC-V1.5, and
+IF-mpDiMPC-V2 algorithms.
+
+4. Case studies
+To evaluate the performance and general applicability of the developed IF-mpDiMPC methods, a series of random plants are used.
+This approach is inspired by the methodology presented in Wang and
+Yang (2022) on (iterative) DiMPC. All the IF-mpDiMPC methods are
+implemented on systems consisting of 𝑀 ∈ [2, 3, 4, 5] subsystems. Each
+subsystem is assumed to be composed of a plant with two states and
+7
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+Fig. 1. Flowchart of the developed IF-mpDiMPC, IF-mpDiMPC-V1.5, and IF-mpDiMPC-V2 algorithms.
+
+one input (𝑛𝑥,𝑖 = 2, 𝑛𝑢,𝑖 = 1, ∀𝑖 ∈ 1 ∶ 𝑀). Each element of state
+matrix 𝐴𝑖 and input matrix 𝐵𝑖,𝑗 is randomly chosen from the interval
+[−1, 1]. The coupling between subsystems is inherent in the structure of
+the randomly generated plants, specifically in the 𝐵𝑖,𝑗 matrices. Also,
+the states are assumed to be upper bounded by a random number
+from the interval [10, 100] and lower bounded by a number chosen
+from the interval [−100, −10]. Similarly, the upper bound of inputs is
+chosen from the interval [1, 5] and the lower bound is chosen from the
+
+interval [−5, −1]. The prediction horizon length is assumed to equal the
+control horizon length for all local controllers and is set to 3 in this
+work. 100 random controllable plants are created for each case study
+of 𝑀 ∈ [2, 3, 4, 5] with dynamic matrices and initial conditions chosen
+randomly within the aforementioned bounds. For example, a random
+plant with 2 subsystems is:
+𝐱1 (𝑘 + 1) = 𝐴1 𝐱1 (𝑘) + 𝐵1,1 𝑢1 (𝑘) + 𝐵1,2 𝑢2 (𝑘)
+𝐱2 (𝑘 + 1) = 𝐴2 𝐱2 (𝑘) + 𝐵2,1 𝑢1 (𝑘) + 𝐵2,2 𝑢2 (𝑘)
+8
+
+(26)
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+comparison purposes) at time 0 s. For the concise representation of
+the results, only a single output value, the sum of all states for each
+subsystem, is shown. For example, in case of 𝑀 = 2 subsystems (Fig.
+3), wherein each subsystem controller has 2 states (𝐱1 ∈ R2 , and 𝐱2 ∈
+R2 ), the outputs 𝑦1 and 𝑦2 are the element-wise summations of the
+state vectors 𝐱1 and 𝐱2 , respectively. While this approach simplifies
+the presentation of results across the randomly generated plant models,
+in physical systems, summing different state variables may not always
+have a meaningful interpretation. The focus here is on demonstrating
+the overall dynamic behavior and convergence of the subsystems under
+different control strategies. To ensure that the control performance
+results of DiMPC and I-mpDiMPC match with those of the developed
+IF-mpDiMPC algorithms, a low value of 10−8 is considered for the
+error tolerance 𝜖 (see Algorithm 1). Also, the maximum number of
+allowable intermediate iterations 𝑝𝑚𝑎𝑥 = 100. The maximum cap of
+100 intermediate iterations is set as a general upper limit for all plants
+collectively and is not related to the number of plants. In this study,
+all the developed IF-mpDiMPC methods are tested independently for
+each of the 100 plants. The closed-loop simulation results for the 2subsystem case (see Fig. 3) demonstrate that all controllers achieve
+centralized-like performance due to the low value of 𝜖. The closedloop simulation results representing the control performance of the 3–5
+subsystem cases also demonstrate centralized-like performance and can
+be found in the supplementary material. The controllers successfully
+steer random initial conditions to equilibrium within approximately 30
+s, despite the randomly selected plant dynamics. While iterative approaches like DiMPC and I-mpDiMPC require more iterations and incur
+higher communication and computational costs to achieve plantwide
+optimality, the proposed IF-mpDiMPC method achieves similar performance efficiently, reducing both communication and computational
+overhead by simultaneously solving the explicitly generated control law
+expressions of the different local controllers.
+
+Fig. 2. The number of critical regions for different number of subsystems on a log scale.
+Note that the number of critical regions remains the same for all the mp programming
+DiMPC solution approaches, which differ only in the calculation method of optimal
+control inputs.
+
+[
+]
+[
+]
+0.1645
+0.7399
+−0.3639
+where, 𝐱1 ∈ R2 , 𝐱2 ∈ R2 , 𝐴1 =
+, 𝐵1,1 =
+,
+0.0815 −0.4704
+−0.7616
+[
+]
+[
+]
+[
+]
+0.8797
+−0.0411 0.0894
+0.0878
+𝐵1,2 =
+, 𝐴2 =
+, 𝐵2,1 =
+, and 𝐵2,2 =
+0.2911
+0.2786
+0.2946
+0.4421
+[
+]
+0.0450
+. Further, the state and input dynamic vectors are bounded as
+0.9874
+follows:
+[
+]
+[
+]
+−63.5878
+29.6809
+≤ 𝐱1 ≤
+−59.6464
+19.5218
+[
+]
+[
+]
+−67.0765
+19.8728
+≤ 𝐱2 ≤
+(27)
+−31.2846
+15.7232
+−1.2686 ≤ 𝑢1 ≤ 3.5116
+−1.1090 ≤ 𝑢2 ≤ 4.0879
+
+5.2. Comparison of computational performance
+
+5. Results and discussion
+
+The computational performance of the different controllers and for
+the different number of subsystem cases is shown in Figs. 4.1 The
+computation time represents the average time the numerical simulation
+takes from the initial sample time instant to that where all the plant
+states reach 0.02% of their equilibrium value. The equilibrium values
+refer to the steady-state values that the plant states achieve at the end of
+the closed-loop simulation time span. This convergence highlights the
+equal effectiveness of the developed IF-mpDiMPC methods compared to
+the conventional I-mpDiMPC and MPC schemes across all subsystems.
+Note that the IF-mpDiMPC approach solves a system of simultaneous
+equations at each time step. As a result, the overall computation time
+is linearly proportional to the chosen control simulation time, which
+in this study is 100 s with a 1 s time step. It can be observed that
+all the controllers show an increasing trend in computation time with
+increase in the number of subsystems. In the case of IF-mpDiMPC, the
+computation time rises exponentially with the increase in the number of
+subsystems. Hence, solving IF-mpDiMPC for 4 and 5 subsystems proved
+to be computationally prohibitively expensive. This underscores the
+need for more efficient algorithms like IF-mpDiMPC-V2 when dealing
+with larger, more complex systems. The mean computation time for
+various control architectures and the percentage change relative to
+DiMPC are shown in Table 1. The mean values of both IF-mpDiMPC
+and IF-mpDiMPC-V1.5 architectures are more than that of I-mpDiMPC
+for all the number of subsystem cases. However, the computation time
+of IF-mpDiMPC-V2 is less than that of I-mpDiMPC, again for all number
+of subsystem cases. Although the simultaneous solution approach of
+IF-mpDiMPC and IF-mpDiMPC-V1.5 is computationally expensive, for
+
+In this section, the numerical simulation results of the random
+plants under the developed IF-mpDiMPC controllers are compared in
+terms of trade-offs between computational efficiency and communication load with the existing DiMPC approaches (Stewart et al., 2010;
+Wang and Yang, 2022) and I-mpDiMPC (Saini et al., 2023) controllers.
+All simulations are performed on a desktop computer with Intel(R)
+Core(TM) i7-10700 CPU @ 2.90 GHz processor, 16 GB RAM, and
+512 GB SSD. The quadratic programming (QP) problems in the DiMPC
+OCP are solved using the IBM ILOG CPLEX (Cplex, 2009) solver. For
+the explicit multiparametric quadratic programming (mpQP) solutions
+required in I-mpDiMPC and all versions of IF-mpDiMPC, the POP
+Toolbox (Oberdieck et al., 2016) is employed. Also, default conditions
+have been retained while using the CPLEX QP solver and POP toolbox
+while simulating all case studies. Initially, random plants as described
+in Section 4 are generated. Subsequently, the explicit solutions of each
+local I-mpDiMPC controller in all random plants are calculated. The
+boundaries of each critical region are also determined offline and stored
+(for use during online deployment). Fig. 2 shows the distribution of the
+total number of critical regions of all the local controllers combined for
+the different subsystem cases. Note that the number of critical regions
+remains the same for all mp programming approaches, I-mpDiMPC,
+IF-mpDiMPC, IF-mpDiMPC-V1.5, and IF-mpDiMPC-V2, as only the calculation of the optimal control input solutions from the critical regions
+differ in these algorithms. It can be observed that the number of critical
+regions increases exponentially with the number of systems.
+5.1. Simulations of control performance
+The random plants are simulated for a time duration of 100 s with
+random initial conditions (kept the same for all solution algorithms for
+
+1
+* and ** indicate the results of the existing approaches in all comparison
+figures and tables.
+
+9
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+Table 1
+Average computation times (in seconds) and percentage change relative to DiMPC.
+Architecture
+
+DiMPC∗
+I-mpDiMPC∗∗
+IF-mpDiMPC
+IF-mpDiMPC-V1.5
+IF-mpDiMPC-V2
+
+2
+
+3
+
+4
+
+5
+
+Time (s)
+
+Δ%
+
+Time (s)
+
+Δ%
+
+Time (s)
+
+Δ%
+
+Time (s)
+
+Δ%
+
+9.914
+0.074
+0.354
+0.617
+0.205
+
+–
+−99.25%
+−96.43%
+−93.78%
+−97.93%
+
+24.884
+0.515
+167.218
+3.174
+0.511
+
+–
+−97.93%
++572.08%
+−87.24%
+−97.95%
+
+54.497
+3.254
+–
+12.374
+0.758
+
+–
+−94.02%
+–
+−77.29%
+−98.61%
+
+77.585
+12.777
+–
+67.993
+2.936
+
+–
+−83.53%
+–
+−12.38%
+−96.21%
+
+Table 2
+Maximal and average number of iterations under DiMPC (and I-mpDiMPC).
+No. of Subsystems
+
+Maximal Iteration
+
+Average Iteration
+
+2
+3
+4
+5
+
+38
+62
+100
+100
+
+19.99
+33.97
+49.86
+66.05
+
+subsystems results in an increase in both the maximum and average
+number of iterations. As the number of subsystems increases, obtaining
+a plantwide optimum through the DiMPC solution algorithm results
+in an increased number of intermediate iterations. The trend agrees
+with the results of Wang and Yang (2022), wherein the authors have
+compared the performance of DiMPC with their own improved iterative
+solution method.
+To address the communication burden of different control architectures, the instances of data transfer between subsystems for all methods
+are analyzed. Fig. 5 illustrates this comparison in both linear and logarithmic scales. The developed iteration-free methods (IF-mpDiMPC, IFmpDiMPC-V1.5, and IF-mpDiMPC-V2) demonstrate significantly fewer
+instances of data transfer compared to the iterative methods (DiMPC
+and I-mpDiMPC), particularly as the number of subsystems increases.
+For iterative methods, the number of data transfers directly corresponds
+to the number of intermediate iterations required to converge, as
+reported in Table 2. In contrast, iteration-free methods require only a
+single instance of data transfer per time step (100 transfer instances
+for the entire simulation of 100 time steps), regardless of the number of
+subsystems. The black and diamond markers represent rare occurrences
+of the failure of the IF-mpDiMPC-V2 method, in which case the solution algorithm resorts back to I-mpDiMPC during certain control time
+steps. This substantial reduction in data transfer instances translates to
+decreased network traffic and lowered susceptibility to communicationrelated issues. While this analysis does not account for all potential
+sources of communication delay, it demonstrates how the proposed
+iteration-free methods significantly reduce the communication load,
+addressing a key motivation of this work.
+
+Fig. 3. Controller performance for 2 subsystems. (a) Outputs of each subsystem. (b)
+Applied inputs to achieve the given outputs. The solid and dashed lines represent two
+random experimental runs in the output and input plots for visualization purposes.
+
+6. Conclusions
+the case studies presented in the paper, it helps reduce communication
+load significantly compared to I-mpDiMPC as the information between
+the local controllers is exchanged only once per sample time. Note that
+an increase in the number of iterations of I-mpDiMPC with increased
+communication load will also delay control input calculation, which is
+not accounted for in the numerical simulation study. The IF-mpDiMPCV2 algorithm performs the best, not only in terms of the communication
+load reduction but also in the computation time reduction.
+
+Novel iteration-free DiMPC algorithms were developed based on mp
+programming, IF-mpDiMPC, IF-mpDiMPC-V1.5, and IF-mpDiMPC-V2.
+The communication and computational performances of the developed
+algorithms were studied and compared against their iterative counterparts. Randomly generated plants with different numbers of subsystems
+were used to perform numerical simulation studies of the closed-loop
+operation under the developed controllers. All the controllers were
+tuned to obtain the centralized-like output tracking performance for
+comparison purposes. In IF-mpDiMPC, the explicitly generated solutions of all the local controllers were solved simultaneously to obtain
+the control inputs at each sample time step. This method was improved
+in IF-mpDiMPC-V1.5 by performing feasibility checks on the explicitly
+generated solutions in terms of constraint satisfaction, thereby reducing the set of equations that should be considered for simultaneous
+solutions online. This method was improved further in IF-mpDiMPCV2 by only considering the previous sample time step solution and its
+
+5.3. Comparison of communication performance
+The maximum number of single sample time step intermediate
+iterations for the entire simulation time period for each experiment
+is recorded. Further, maximum and average values of all the maximum iteration numbers for DiMPC and I-mpDiMPC are determined
+and listed in Table 2. As can be seen, an increase in the number of
+10
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+Fig. 4. Computation times in log scale for the different DiMPC control architectures. Figure 4 in the supplementary material presents the same data on a linear scale for comparison.
+
+Fig. 5. Number of instances of data transfer in log scale for the different DiMPC control architectures for the entire simulation of 100-time steps. Figure 7 in the supplementary
+material presents the same data on a linear scale for comparison.
+
+nearest neighbors for the simultaneous solution online. IF-mpDiMPC
+and IF-mpDiMPC-V1.5 needed more time to solve and obtain the
+solution compared to the iterative I-mpDiMPC algorithm for all the
+number of subsystem cases as the time required to solve all the explicitly generated equations exceeded that of the iterative procedure
+convergence. IF-mpDiMPC-V2, on the other hand, performed the best
+in terms of the computation time among all the controllers and for all
+the number of subsystem cases due to the reduced set of equations
+for simultaneous solutions. Furthermore, the developed iteration-free
+controllers significantly reduced the communication burden, especially
+as system complexity increased, by requiring only a single exchange of
+information between local controllers at each sample time, in contrast
+to the multiple exchanges typical of iterative approaches. This streamlined data exchange improved the robustness of the control network in
+dealing with communication challenges.
+A limitation of this work is the increased computational cost associated with the developed IF-mpDiMPC methods. This cost rises with
+the number of critical regions, which increases as the states, inputs,
+prediction horizon, and control horizon increase. Note that this issue
+is not particular to the developed methods but to mp programming
+or mpMPC in general (Ferreau et al., 2008). While IF-mpDiMPC-V2
+partially mitigates this by checking only the current and neighboring
+critical regions, costs can still rise if the solution lies outside these areas.
+Additionally, this study has not yet explored worst-case scenarios, as
+the focus was on optimizing performance under nominal conditions.
+Also, while the current method was developed for systems with linear
+dynamics, extending the IF-mpDiMPC methods to nonlinear systems,
+especially those when linearized for MPC, do not yield satisfactory
+control performance, remains an important challenge. Addressing the
+optimal control of nonlinear plants with coupling would require the development of advanced mp programming algorithms capable of solving
+
+nonlinear OCPs effectively. Future research could extend these methods
+to assess robustness and stability in such cases.
+CRediT authorship contribution statement
+Radhe S.T. Saini: Writing – original draft, Visualization, Validation, Software, Methodology, Investigation, Formal analysis, Data curation. Parth R. Brahmbhatt: Writing – original draft, Visualization, Validation, Software, Methodology, Investigation, Formal analysis, Data
+curation. Styliani Avraamidou: Writing – review & editing, Visualization, Validation, Supervision, Methodology, Investigation, Formal
+analysis, Conceptualization. Hari S. Ganesh: Writing – review & editing, Visualization, Validation, Supervision, Methodology, Investigation,
+Formal analysis, Conceptualization.
+Declaration of competing interest
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to
+influence the work reported in this paper.
+Appendix A. Supplementary data
+Supplementary material related to this article can be found online
+at https://doi.org/10.1016/j.compchemeng.2025.109169.
+Data availability
+Data will be made available on request.
+
+11
+
+Computers and Chemical Engineering 200 (2025) 109169
+
+R.S.T. Saini et al.
+
+References
+
+Negenborn, R.R., Maestre, J.M., 2014. Distributed model predictive control: An
+overview and roadmap of future research opportunities. IEEE Control Syst. Mag.
+34 (4), 87–97.
+Oberdieck, R., Diangelakis, N.A., Papathanasiou, M.M., Nascu, I., Pistikopoulos, E.N.,
+2016. Pop–parametric optimization toolbox. Ind. Eng. Chem. Res. 55 (33),
+8979–8991.
+Pappas, I., Kenefake, D., Burnak, B., Avraamidou, S., Ganesh, H.S., Katz, J., Diangelakis, N.A., Pistikopoulos, E.N., 2021. Multiparametric programming in process
+systems engineering: Recent developments and path forward. Front. Chem. Eng. 2,
+620168.
+Pistikopoulos, E.N., Diangelakis, N.A., Oberdieck, R., Papathanasiou, M.M., Nascu, I.,
+Sun, M., 2015. PAROC—An integrated framework and software platform for the
+optimisation and advanced model-based control of process systems. Chem. Eng. Sci.
+136, 115–138.
+Pistikopoulos, E.N., Dua, V., Bozinis, N.A., Bemporad, A., Morari, M., 2002. On-line
+optimization via off-line parametric optimization tools. Comput. Chem. Eng. 26
+(2), 175–185.
+Qin, S.J., Badgwell, T.A., 1997. An overview of industrial model predictive control
+technology. In: AIche Symposium Series. vol. 93, (316), New York, NY: American
+Institute of Chemical Engineers, 1971-c2002, pp. 232–256.
+Rawlings, J.B., Mayne, D.Q., Diehl, M., 2017. Model Predictive Control: Theory,
+Computation, and Design. vol. 2, Nob Hill Publishing Madison, WI.
+Richards, A., How, J.P., 2007. Robust distributed model predictive control. Internat. J.
+Control 80 (9), 1517–1531.
+Saini, R.S., Pappas, I., Avraamidou, S., Ganesh, H.S., 2023. Noncooperative distributed
+model predictive control: A multiparametric programming approach. Ind. Eng.
+Chem. Res..
+Siljak, D.D., 1991. Decentralized Control of Complex Systems. Academic Press, New
+York, USA.
+Stewart, B.T., Venkat, A.N., Rawlings, J.B., Wright, S.J., Pannocchia, G., 2010.
+Cooperative distributed model predictive control. Systems Control Lett. 59 (8),
+460–469.
+Trodden, P.A., Maestre, J.M., 2017. Distributed predictive control with minimization
+of mutual disturbances. Automatica 77, 31–43.
+Venkat, A.N., Rawlings, J.B., Wright, S.J., 2007. Distributed model predictive control
+of large-scale systems. In: Assessment and Future Directions of Nonlinear Model
+Predictive Control. Springer, pp. 591–605.
+Wang, J., Yang, Y., 2022. An improved iterative solution for cooperative distributed
+MPC. Automatica 140, 110155.
+Wegstein, J.H., 1958. Accelerating convergence of iterative processes. Commun. ACM
+1 (6), 9–13.
+Wu, L., Yin, X., Pan, L., Liu, J., 2023. Distributed economic predictive control of
+integrated energy systems for enhanced synergy and grid response: A decomposition
+and cooperation strategy. Appl. Energy 349, 121627.
+Zhu, Z., Guan, G., Wang, K., 2023. Distributed model predictive control based on
+the alternating direction method of multipliers for branching open canal irrigation
+systems. Agricult. Water. Manag. 285, 108372.
+
+Avraamidou, S., Pistikopoulos, E.N., 2017. A multi-parametric bi-level optimization
+strategy for hierarchical model predictive control. In: Computer Aided Chemical
+Engineering. vol. 40, Elsevier, pp. 1591–1596.
+Bemporad, A., Morari, M., Dua, V., Pistikopoulos, E.N., 2002. The explicit linear
+quadratic regulator for constrained systems. Automatica 38 (1), 3–20.
+Camponogara, E., Jia, D., Krogh, B.H., Talukdar, S., 2002. Distributed model predictive
+control. IEEE Control Syst. Mag. 22 (1), 44–52.
+Chen, W., et al., 2016. Improved distributed model predictive control with control
+planning set. J. Control Sci. Eng. 2016.
+Christofides, P.D., Scattolini, R., de la Pena, D.M., Liu, J., 2013. Distributed model
+predictive control: A tutorial review and future research directions. Comput. Chem.
+Eng. 51, 21–41.
+Cplex, I.I., 2009. V12. 1: User’s manual for CPLEX. Int. Bus. Mach. Corp. 46 (53), 157.
+Cui, H., Jacobsen, E.W., 2002. Performance limitations in decentralized control. J.
+Process Control 12 (4), 485–494.
+Cutler, C.R., Ramaker, B.L., 1980. Dynamic matrix control?? A computer control
+algorithm. In: Joint Automatic Control Conference. (17), p. 72.
+Diangelakis, N.A., Avraamidou, S., Pistikopoulos, E.N., 2016. Decentralized multiparametric model predictive control for domestic combined heat and power systems.
+Ind. Eng. Chem. Res. 55, 3313–3326.
+Farina, M., Scattolini, R., 2011. Distributed non-cooperative MPC with neighbor-toneighbor communication. IFAC Proc. Vol. 44 (1), 404–409.
+Farina, M., Scattolini, R., 2012. Distributed predictive control: A non-cooperative
+algorithm with neighbor-to-neighbor communication for linear systems. Automatica
+48 (6), 1088–1096.
+Feng, Y., Yu, S., Chen, H., Li, Y., Shi, S., Yu, J., Chen, H., 2023. Distributed MPC of
+vehicle platoons with guaranteed consensus and string stability. Sci. Rep. 13 (1),
+10396.
+Ferramosca, A., Limón, D., Alvarado, I., Camacho, E.F., 2013. Cooperative distributed
+MPC for tracking. Automatica 49 (4), 906–914.
+Ferreau, H.J., Bock, H.G., Diehl, M., 2008. An online active set strategy to overcome
+the limitations of explicit MPC. Int. J. Robust Nonlinear Control.: IFAC- Affil. J.
+18 (8), 816–830.
+Kirubakaran, V., Radhakrishnan, T., Sivakumaran, N., 2014. Distributed multiparametric model predictive control design for a quadruple tank process. Measurement 47,
+841–854.
+Langner, F., Wang, W., Frahm, M., Hagenmeyer, V., 2024. Model predictive control of distributed energy resources in residential buildings considering forecast
+uncertainties. Energy Build. 303, 113753.
+Lu, P., Zhang, N., Ye, L., Du, E., Kang, C., 2024. Advances in model predictive control
+for large-scale wind power integration in power systems: A comprehensive review.
+Adv. Appl. Energy 100177.
+Maciejowski, J., 2002. Predictive Control: With Constraints. Prentice Hall.
+Morari, M., Lee, J.H., 1999. Model predictive control: past, present and future. Comput.
+Chem. Eng. 23 (4–5), 667–682.
+
+12
+
+

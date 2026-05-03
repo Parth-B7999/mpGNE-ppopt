@@ -1,0 +1,5 @@
+numpy==2.4.4
+matplotlib==3.10.8
+scipy==1.17.1
+ppopt==1.6.12
+gurobipy==13.0.1
