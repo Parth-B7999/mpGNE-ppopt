@@ -262,7 +262,7 @@ def _compute_residuals(
 def admm_solve(
     game: GNEGame,
     p: np.ndarray,
-    rho: float = 1.0,
+    rho: float = 0.5,
     max_iter: int = 500,
     tol: float = 1e-4,
     verbose: bool = False,

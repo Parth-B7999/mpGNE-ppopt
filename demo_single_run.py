@@ -34,7 +34,7 @@ from mpgne.cr_store import (
 from mpgne.admm_solver import admm_solve
 from mpgne.proj_grad_solver import pg_solve
 # %% ── 2. Settings ────────────────────────────────────────────────────────────
-M                 = 4
+M                 = 6
 T_SIM             = 100
 L_MAX             = 2.5
 OFFLINE_BFS_MAX_M = 4
@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     # ── Generate plant ────────────────────────────────────────────────────────
     print(f"\n[1/5] Generating random system with M={M} agents...")
-    plant = make_random_plants(M, 1, seed=202)[0]
+    plant = make_random_plants(M, 1, seed=20)[0]
 
     # ── Build game ────────────────────────────────────────────────────────────
     print(f"[2/5] Building game formulation...")

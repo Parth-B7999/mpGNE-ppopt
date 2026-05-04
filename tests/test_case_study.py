@@ -41,7 +41,7 @@ from ppopt.mp_solvers.solve_mpqp import mpqp_algorithm
 # ═══════════════════════════════════════════════════════════════════════════════
 N_PLANTS      = 5          # paper uses 100  →  increase for full reproduction
 T_SIM         = 100    # closed-loop simulation steps
-M_LIST        = [4]  # number of agents to test
+M_LIST        = [3]  # number of agents to test
 EXPLICIT_MAX_M = 4         # skip Explicit-GNE (exhaustive) for M >= this value
 OFFLINE_BFS_MAX_M = 4      # skip Offline BFS map-building for M >= this value
 FORCE_OFFLINE_BFS = False  # Set to True to force offline BFS for M >= 4 (Backup option)
