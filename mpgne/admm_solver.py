@@ -28,7 +28,7 @@ x-update  (each agent i, parallelisable):
     min  ½ x_i^T (Q_i + ρ C_i^T C_i) x_i + l_i^T x_i
     s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
     where  l_i = c_i + F_i p - C_i^T λ_i^k - ρ C_i^T z_i^k
-    → solved with scipy SLSQP
+    → solved with OSQP (default) or scipy SLSQP (fallback)
 
 z-update  (global projection onto coupling set):
     z_i^{unc} = C_i x_i^{k+1} + λ_i^k / ρ
@@ -44,6 +44,11 @@ Stopping criterion
 Primal residual:  r = ‖concat_i(C_i x_i - z_i)‖
 Dual residual:    s = ρ ‖concat_i C_i^T (z_i^{k+1} - z_i^k)‖
 Stop when max(r, s) < tol.
+
+QP Solver selection
+───────────────────
+Pass  qp_solver="osqp"   (default) for OSQP — fast, no warm-starting.
+Pass  qp_solver="slsqp"  to fall back to scipy SLSQP.
 """
 
 from __future__ import annotations
@@ -51,7 +56,14 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
+import scipy.sparse as sp
 from scipy.optimize import minimize
+
+try:
+    import osqp as _osqp_lib
+    _OSQP_AVAILABLE = True
+except ImportError:
+    _OSQP_AVAILABLE = False
 
 from .game import GNEGame
 
@@ -101,57 +113,53 @@ class ADMMResult:
 #  x-update: each agent's augmented QP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _solve_agent_xupdate(
-    game: GNEGame,
-    i: int,
-    p: np.ndarray,
-    z_i: np.ndarray,
-    lambda_i: np.ndarray,
-    rho: float,
+def _solve_agent_xupdate_osqp(
+    ai,
+    l_i: np.ndarray,
+    Q_aug: np.ndarray,
+    rhs: np.ndarray,
+) -> np.ndarray:
+    """Solve agent x-update QP via OSQP (cold-start, no warm-starting)."""
+    n = ai.n_x
+    m = len(rhs)
+
+    P = sp.csc_matrix(np.triu(Q_aug))          # upper-triangular sparse
+    A = sp.csc_matrix(ai.A_loc)                # (m, n)
+    lb = -np.inf * np.ones(m)                  # one-sided: A x <= rhs
+
+    prob = _osqp_lib.OSQP()
+    prob.setup(
+        P, l_i, A, lb, rhs,
+        warm_starting=False,    # cold start — no reuse between calls
+        verbose=False,
+        eps_abs=1e-8,
+        eps_rel=1e-8,
+        max_iter=10_000,
+        adaptive_rho=True,
+        polish=False,
+    )
+    res = prob.solve()
+
+    if res.info.status in ("solved", "solved_inaccurate") and res.x is not None:
+        return res.x
+    # OSQP failed — silently fall back to SLSQP
+    return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, rhs)
+
+
+def _solve_agent_xupdate_slsqp(
+    ai,
+    l_i: np.ndarray,
+    Q_aug: np.ndarray,
+    rhs: np.ndarray,
     x0: np.ndarray | None = None,
 ) -> np.ndarray:
-    """
-    Solve agent i's x-update QP.
-
-    min  ½ x_i^T (Q_i + ρ C_i^T C_i) x_i + l_i^T x_i
-    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
-
-    where  l_i = c_i + F_i p + C_i^T λ_i - ρ C_i^T z_i
-
-    Parameters
-    ----------
-    game     : GNEGame
-    i        : agent index
-    p        : parameter vector (n_p,)
-    z_i      : current z_i^k  (n_coupling,)
-    lambda_i : current λ_i^k  (n_coupling,)
-    rho      : ADMM penalty parameter
-    x0       : warm-start (n_x_i,), zeros if None
-
-    Returns
-    -------
-    x_i^{k+1}  (n_x_i,)
-    """
-    ai = game.agents[i]
-
-    # Augmented Hessian: Q_i + ρ C_i^T C_i
-    Q_aug = ai.Q + rho * ai.C.T @ ai.C            # (n_x_i, n_x_i)
-
-    # Augmented linear term: c_i + F_i p + C_i^T λ_i - ρ C_i^T z_i
-    # Boyd et al. 2010 ADMM: L_ρ = f(x) + λ^T(Ax - z) + ρ/2||Ax - z||^2
-    # ∂/∂x_i: c_i + F_i p + C_i^T λ_i - ρ C_i^T z_i + ρ C_i^T C_i x_i
-    l_i = ai.c + ai.F @ p + ai.C.T @ lambda_i - rho * ai.C.T @ z_i  # (n_x_i,)
-
-    # Local constraint RHS: b_loc + S_loc p
-    rhs = ai.b_loc + ai.S_loc @ p   # (n_loc,)
-
+    """Solve agent x-update QP via scipy SLSQP."""
     def obj(x):
         return 0.5 * x @ Q_aug @ x + l_i @ x
 
     def jac(x):
         return Q_aug @ x + l_i
 
-    # scipy SLSQP: inequality constraints as g(x) >= 0  →  rhs - A_loc x >= 0
     constraints = [{
         'type': 'ineq',
         'fun':  lambda x: rhs - ai.A_loc @ x,
@@ -166,6 +174,43 @@ def _solve_agent_xupdate(
         options={'ftol': 1e-12, 'maxiter': 200, 'disp': False},
     )
     return res.x
+
+
+def _solve_agent_xupdate(
+    game: GNEGame,
+    i: int,
+    p: np.ndarray,
+    z_i: np.ndarray,
+    lambda_i: np.ndarray,
+    rho: float,
+    x0: np.ndarray | None = None,
+    qp_solver: str = "osqp",
+) -> np.ndarray:
+    """
+    Solve agent i's x-update QP.
+
+    min  ½ x_i^T (Q_i + ρ C_i^T C_i) x_i + l_i^T x_i
+    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
+
+    Parameters
+    ----------
+    qp_solver : "osqp" (default, fast, cold-start) or "slsqp"
+    """
+    ai = game.agents[i]
+
+    # Augmented Hessian: Q_i + ρ C_i^T C_i
+    Q_aug = ai.Q + rho * ai.C.T @ ai.C            # (n_x_i, n_x_i)
+
+    # Augmented linear term
+    l_i = ai.c + ai.F @ p + ai.C.T @ lambda_i - rho * ai.C.T @ z_i
+
+    # Local constraint RHS: b_loc + S_loc p
+    rhs = ai.b_loc + ai.S_loc @ p
+
+    if qp_solver == "osqp" and _OSQP_AVAILABLE:
+        return _solve_agent_xupdate_osqp(ai, l_i, Q_aug, rhs)
+    else:
+        return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, rhs, x0=x0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,30 +233,24 @@ def _z_update(
     Project {z_i} onto {Σ_i z_i ≤ d + S_coup p}  row-wise uniform shift:
         excess_r = max(0,  Σ_i z_{i,r}^{unc}  -  rhs_r)
         z_{i,r}  = z_{i,r}^{unc}  -  excess_r / N
-
-    Returns
-    -------
-    list of z_i^{k+1}  (n_coupling,) for each agent
     """
     N   = game.N
-    rhs = game.d + game.S_coup @ p   # (n_coupling,)
+    rhs = game.d + game.S_coup @ p
 
-    # Boyd ADMM z-update: min -λ_i^T z_i + ρ/2||C_i x_i - z_i||^2
-    # stationarity: ρ(z_i - C_i x_i) - λ_i = 0  →  z_i^{unc} = C_i x_i + λ_i/ρ
     z_unc = [
         game.agents[i].C @ x_list[i] + lambdas[i] / rho
         for i in range(N)
     ]
 
-    agg = sum(z_unc)                   # Σ_i z_i^{unc}  (n_coupling,)
-    excess = np.maximum(0.0, agg - rhs)# element-wise excess  (n_coupling,)
-    shift  = excess / N                # uniform shift per agent
+    agg    = sum(z_unc)
+    excess = np.maximum(0.0, agg - rhs)
+    shift  = excess / N
 
     return [z_i - shift for z_i in z_unc]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  λ-update: dual variable for equality C_i x_i = z_i
+#  λ-update
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _lambda_update(
@@ -221,9 +260,7 @@ def _lambda_update(
     lambdas: list[np.ndarray],
     rho: float,
 ) -> list[np.ndarray]:
-    """
-    λ_i^{k+1} = λ_i^k + ρ (C_i x_i^{k+1} - z_i^{k+1})
-    """
+    """λ_i^{k+1} = λ_i^k + ρ (C_i x_i^{k+1} - z_i^{k+1})"""
     return [
         lambdas[i] + rho * (game.agents[i].C @ x_list[i] - z_list[i])
         for i in range(game.N)
@@ -267,35 +304,41 @@ def admm_solve(
     tol: float = 1e-4,
     verbose: bool = False,
     x_init: list[np.ndarray] | None = None,
+    qp_solver: str = "osqp",
 ) -> ADMMResult:
     """
     Solve the GNE for a specific parameter p using ADMM.
 
     Parameters
     ----------
-    game     : GNEGame
-    p        : parameter vector (n_p,)
-    rho      : ADMM penalty parameter (> 0).
-               Too small → slow convergence; too large → oscillation.
-               Rule of thumb: rho ≈ sqrt(λ_max(Q_i)).
-    max_iter : maximum ADMM iterations
-    tol      : stopping threshold for max(primal_res, dual_res)
-    verbose  : print per-iteration summary
-    x_init   : warm-start list of x_i^0  (if None, initialise at zeros)
+    game      : GNEGame
+    p         : parameter vector (n_p,)
+    rho       : ADMM penalty parameter (> 0).
+    max_iter  : maximum ADMM iterations
+    tol       : stopping threshold for max(primal_res, dual_res)
+    verbose   : print per-iteration summary
+    x_init    : warm-start list of x_i^0  (if None, initialise at zeros)
+    qp_solver : "osqp" (default) or "slsqp" — inner QP solver for x-update.
+                Both use cold-start (no warm-starting within the QP solver).
 
     Returns
     -------
     ADMMResult
     """
+    if qp_solver == "osqp" and not _OSQP_AVAILABLE:
+        import warnings
+        warnings.warn("OSQP not installed; falling back to SLSQP. "
+                      "Install with: pip install osqp", stacklevel=2)
+        qp_solver = "slsqp"
+
     p   = np.asarray(p, dtype=float).ravel()
     N   = game.N
-    rhs = game.d + game.S_coup @ p   # coupling RHS for this p
+    rhs = game.d + game.S_coup @ p
 
     # ── initialise ────────────────────────────────────────────────────────────
     if x_init is None:
         x_list = [np.zeros(game.agents[i].n_x) for i in range(N)]
     elif isinstance(x_init, np.ndarray) and x_init.ndim == 1:
-        # Split stacked array
         x_list = []
         offset = 0
         for i in range(N):
@@ -303,11 +346,10 @@ def admm_solve(
             x_list.append(x_init[offset:offset+nx_i])
             offset += nx_i
     else:
-        # Assume it's a list of arrays
         x_list = [x.copy() for x in x_init]
 
-    z_list     = [game.agents[i].C @ x_list[i] for i in range(N)]
-    lambdas    = [np.zeros(game.n_coupling) for _ in range(N)]
+    z_list  = [game.agents[i].C @ x_list[i] for i in range(N)]
+    lambdas = [np.zeros(game.n_coupling) for _ in range(N)]
 
     primal_hist: list[float] = []
     dual_hist:   list[float] = []
@@ -323,7 +365,7 @@ def admm_solve(
         # ── x-update (each agent independently) ──────────────────────────────
         x_new = [
             _solve_agent_xupdate(game, i, p, z_list[i], lambdas[i], rho,
-                                  x0=x_list[i])
+                                 x0=x_list[i], qp_solver=qp_solver)
             for i in range(N)
         ]
 
@@ -342,7 +384,7 @@ def admm_solve(
         dual_hist.append(dual_res)
 
         if verbose and (k % 50 == 0 or k == max_iter - 1):
-            agg = sum(game.agents[i].C @ x_list[i] for i in range(N))
+            agg  = sum(game.agents[i].C @ x_list[i] for i in range(N))
             viol = float(np.max(np.maximum(0.0, agg - rhs)))
             print(f"  [ADMM] iter {k:4d}  r={primal_res:.2e}  s={dual_res:.2e}"
                   f"  coupling_viol={viol:.2e}")
@@ -353,7 +395,6 @@ def admm_solve(
 
     solve_time = time.perf_counter() - t0
 
-    # ── coupling violation at termination ────────────────────────────────────
     agg = sum(game.agents[i].C @ x_list[i] for i in range(N))
     coupling_viol = float(np.max(np.maximum(0.0, agg - rhs)))
 
@@ -383,6 +424,7 @@ def admm_solve_grid(
     max_iter: int = 500,
     tol: float = 1e-4,
     verbose: bool = False,
+    qp_solver: str = "osqp",
 ) -> list[ADMMResult]:
     """
     Solve GNE for each row of p_grid using ADMM.
@@ -391,22 +433,19 @@ def admm_solve_grid(
 
     Parameters
     ----------
-    game   : GNEGame
-    p_grid : (n_samples, n_p) array of parameter vectors
-    rho, max_iter, tol : passed to admm_solve
-
-    Returns
-    -------
-    list of ADMMResult, one per row of p_grid
+    game      : GNEGame
+    p_grid    : (n_samples, n_p) array of parameter vectors
+    qp_solver : "osqp" (default) or "slsqp"
     """
     results = []
     x_warm  = None
 
     for idx, p in enumerate(p_grid):
         res = admm_solve(game, p, rho=rho, max_iter=max_iter,
-                         tol=tol, verbose=False, x_init=x_warm)
+                         tol=tol, verbose=False, x_init=x_warm,
+                         qp_solver=qp_solver)
         results.append(res)
-        x_warm = res.x_sol     # warm-start next solve
+        x_warm = res.x_sol
 
         if verbose:
             status = "OK" if res.converged else "MAX_ITER"

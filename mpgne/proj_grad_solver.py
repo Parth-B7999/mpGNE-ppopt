@@ -20,13 +20,15 @@ Stopping criterion
 ──────────────────
     δ^k = ‖x^{k+1} − x^k‖  <  tol
 
+QP Solver selection
+───────────────────
+Pass  qp_solver="osqp"   (default) for OSQP — fast, cold-start only.
+Pass  qp_solver="slsqp"  to fall back to scipy SLSQP.
+
 Notes
 ─────
 * Cold-start only (x^0 = 0) — no warm-starting, matching the benchmark
   protocol for a fair comparison with FACET-GNE.
-* For well-conditioned, diagonally-dominant games this converges, but
-  typically requires 10–100× more iterations than ADMM for the same
-  tolerance.
 * Reference: Facchinei & Pang (2003), "Finite-Dimensional Variational
   Inequalities", Chapter 12 (best-response dynamics).
 """
@@ -37,7 +39,14 @@ import time
 from dataclasses import dataclass, field
 
 import numpy as np
+import scipy.sparse as sp
 from scipy.optimize import minimize
+
+try:
+    import osqp as _osqp_lib
+    _OSQP_AVAILABLE = True
+except ImportError:
+    _OSQP_AVAILABLE = False
 
 from .game import GNEGame
 
@@ -75,53 +84,56 @@ class PGResult:
 #  Per-agent best-response QP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _solve_agent_br(
-    game: GNEGame,
-    i: int,
-    p: np.ndarray,
-    x_list: list[np.ndarray],
+def _solve_agent_br_osqp(
+    ai,
+    lin: np.ndarray,
+    rhs_loc: np.ndarray,
+    rhs_coup_i: np.ndarray,
 ) -> np.ndarray:
-    """
-    Solve agent i's best-response QP treating x_{-i} = x_list as fixed.
+    """Solve agent best-response QP via OSQP (cold-start, no warm-starting)."""
+    n      = ai.n_x
+    m_loc  = len(rhs_loc)
+    m_coup = len(rhs_coup_i)
 
-    min  ½ x_i^T Q_i x_i + (c_i + F_i p)^T x_i
-    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p          (local constraints)
-         C_i x_i     ≤ rhs_coup_i                    (agent-i coupling slack)
+    # Stack constraints: [A_loc; C_i] x <= [rhs_loc; rhs_coup_i]
+    A_stack = sp.csc_matrix(np.vstack([ai.A_loc, ai.C]))
+    u_stack = np.concatenate([rhs_loc, rhs_coup_i])
+    l_stack = -np.inf * np.ones(m_loc + m_coup)
 
-    where  rhs_coup_i = d + S_coup p - Σ_{j≠i} C_j x_j
+    P = sp.csc_matrix(np.triu(ai.Q))   # upper-triangular sparse
 
-    Parameters
-    ----------
-    game   : GNEGame
-    i      : agent index
-    p      : parameter vector (n_p,)
-    x_list : current iterate [x_0^k, …, x_{N-1}^k]
+    prob = _osqp_lib.OSQP()
+    prob.setup(
+        P, lin, A_stack, l_stack, u_stack,
+        warm_starting=False,            # cold start — no reuse
+        verbose=False,
+        eps_abs=1e-8,
+        eps_rel=1e-8,
+        max_iter=10_000,
+        adaptive_rho=True,
+        polish=False,
+    )
+    res = prob.solve()
 
-    Returns
-    -------
-    x_i^{k+1}  (n_x_i,)
-    """
-    ai = game.agents[i]
+    if res.info.status in ("solved", "solved_inaccurate") and res.x is not None:
+        return res.x
+    # OSQP failed — silently fall back to SLSQP
+    return _solve_agent_br_slsqp(ai, lin, rhs_loc, rhs_coup_i)
 
-    # Linear cost term for this agent
-    lin = ai.c + ai.F @ p                          # (n_x_i,)
 
-    # Local constraint RHS: b_loc + S_loc p
-    rhs_loc = ai.b_loc + ai.S_loc @ p             # (n_loc,)
-
-    # Coupling slack available to agent i given others are fixed at x^k
-    rhs_coup_i = game.d + game.S_coup @ p         # (n_coupling,)
-    for j in range(game.N):
-        if j != i:
-            rhs_coup_i = rhs_coup_i - game.agents[j].C @ x_list[j]
-
+def _solve_agent_br_slsqp(
+    ai,
+    lin: np.ndarray,
+    rhs_loc: np.ndarray,
+    rhs_coup_i: np.ndarray,
+) -> np.ndarray:
+    """Solve agent best-response QP via scipy SLSQP."""
     def obj(x):
         return 0.5 * x @ ai.Q @ x + lin @ x
 
     def jac(x):
         return ai.Q @ x + lin
 
-    # scipy SLSQP: g(x) >= 0 form
     r_loc  = rhs_loc.copy()
     r_coup = rhs_coup_i.copy()
     constraints = [
@@ -146,6 +158,41 @@ def _solve_agent_br(
     return res.x
 
 
+def _solve_agent_br(
+    game: GNEGame,
+    i: int,
+    p: np.ndarray,
+    x_list: list[np.ndarray],
+    qp_solver: str = "osqp",
+) -> np.ndarray:
+    """
+    Solve agent i's best-response QP treating x_{-i} = x_list as fixed.
+
+    min  ½ x_i^T Q_i x_i + (c_i + F_i p)^T x_i
+    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p          (local constraints)
+         C_i x_i     ≤ rhs_coup_i                    (agent-i coupling slack)
+
+    where  rhs_coup_i = d + S_coup p - Σ_{j≠i} C_j x_j
+
+    Parameters
+    ----------
+    qp_solver : "osqp" (default) or "slsqp"
+    """
+    ai = game.agents[i]
+
+    lin       = ai.c + ai.F @ p                          # (n_x_i,)
+    rhs_loc   = ai.b_loc + ai.S_loc @ p                  # (n_loc,)
+    rhs_coup_i = game.d + game.S_coup @ p                # (n_coupling,)
+    for j in range(game.N):
+        if j != i:
+            rhs_coup_i = rhs_coup_i - game.agents[j].C @ x_list[j]
+
+    if qp_solver == "osqp" and _OSQP_AVAILABLE:
+        return _solve_agent_br_osqp(ai, lin, rhs_loc, rhs_coup_i)
+    else:
+        return _solve_agent_br_slsqp(ai, lin, rhs_loc, rhs_coup_i)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +203,7 @@ def pg_solve(
     max_iter: int = 5000,
     tol: float = 1e-6,
     verbose: bool = False,
+    qp_solver: str = "osqp",
 ) -> PGResult:
     """
     Solve the GNE for a specific parameter p using Jacobi Best-Response.
@@ -164,16 +212,24 @@ def pg_solve(
 
     Parameters
     ----------
-    game     : GNEGame
-    p        : parameter vector (n_p,)
-    max_iter : maximum iterations
-    tol      : stopping threshold for ‖x^{k+1} − x^k‖
-    verbose  : print per-iteration summary
+    game      : GNEGame
+    p         : parameter vector (n_p,)
+    max_iter  : maximum iterations
+    tol       : stopping threshold for ‖x^{k+1} − x^k‖
+    verbose   : print per-iteration summary
+    qp_solver : "osqp" (default) or "slsqp" — inner QP solver for BR step.
+                Both use cold-start (no warm-starting within the QP solver).
 
     Returns
     -------
     PGResult
     """
+    if qp_solver == "osqp" and not _OSQP_AVAILABLE:
+        import warnings
+        warnings.warn("OSQP not installed; falling back to SLSQP. "
+                      "Install with: pip install osqp", stacklevel=2)
+        qp_solver = "slsqp"
+
     p = np.asarray(p, dtype=float).ravel()
     N = game.N
 
@@ -189,7 +245,7 @@ def pg_solve(
     for k in range(max_iter):
         # Jacobi: all agents solve BR simultaneously using x^k
         x_new = [
-            _solve_agent_br(game, i, p, x_list)
+            _solve_agent_br(game, i, p, x_list, qp_solver=qp_solver)
             for i in range(N)
         ]
 

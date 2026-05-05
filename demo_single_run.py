@@ -33,11 +33,26 @@ from mpgne.cr_store import (
 )
 from mpgne.admm_solver import admm_solve
 from mpgne.proj_grad_solver import pg_solve
+from mpgne.impdimc_solver import impdimc_solve
+
 # %% ── 2. Settings ────────────────────────────────────────────────────────────
 M                 = 6
 T_SIM             = 100
 L_MAX             = 2.5
 OFFLINE_BFS_MAX_M = 4
+
+# Inner QP solver for ADMM and Jacobi BR.
+# "osqp"  — OSQP (fast, cold-start). Requires: pip install osqp
+# "slsqp" — scipy SLSQP (no extra install, larger speedup gap vs FACET)
+QP_SOLVER         = "osqp"
+
+# Neighbor-finding methods to benchmark:
+#   "FACET-H"  — Hyperplane Adjacency (fast offline, over-inclusive neighbor sets)
+#   "FACET-LP" — LP Facet Adjacency   (exact, compact — ACC 2026 paper)
+NB_METHODS = {
+    "FACET-H":  "hyperplane_adjacency",
+    "FACET-LP": "facet_adjacency",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -47,7 +62,7 @@ if __name__ == "__main__":
 
     # ── Generate plant ────────────────────────────────────────────────────────
     print(f"\n[1/5] Generating random system with M={M} agents...")
-    plant = make_random_plants(M, 1, seed=20)[0]
+    plant = make_random_plants(M, 1, seed=202)[0]
 
     # ── Build game ────────────────────────────────────────────────────────────
     print(f"[2/5] Building game formulation...")
@@ -57,53 +72,71 @@ if __name__ == "__main__":
         Q_list=Q_list, R_list=R_list, P_list=P_list
     )
 
-    # %% ── 3. Offline mpQP Solving (with Checkpoints) ────────────────────────
-    ckpt_dir = os.path.join(_base_path, "checkpoints_demo")
+    # %% ── 3. Offline mpQP Solving ────────────────────────────────────────────
+    ckpt_dir   = os.path.join(_base_path, "checkpoints_demo")
     os.makedirs(ckpt_dir, exist_ok=True)
-    agent_ckpt = os.path.join(ckpt_dir, f"agent_sols_M{M}_L{L_MAX}.pkl")
-    facet_ckpt = os.path.join(ckpt_dir, f"facet_sol_M{M}_L{L_MAX}.pkl")
+    base_ckpt  = os.path.join(ckpt_dir, f"agent_sols_base_M{M}_L{L_MAX}.pkl")
 
-    if os.path.exists(agent_ckpt) and os.path.exists(facet_ckpt):
-        print(f"\n[3-4/5] Loading precomputed solutions from checkpoints_demo...")
-        agent_sols = load_agent_solutions(agent_ckpt)
-        facet_sol  = load_gne_solution(facet_ckpt)
+    # Solve mpQP once (shared by both neighbor methods)
+    if os.path.exists(base_ckpt):
+        print(f"\n[3/5] Loading base mpQP solutions from checkpoint...")
+        agent_sols_base = load_agent_solutions(base_ckpt)
     else:
         print("\n[3/5] Solving offline mpQP for all agents...")
         t0 = time.perf_counter()
-        agent_sols = solve_all_agents_mp(
+        agent_sols_base = solve_all_agents_mp(
             game,
             algorithm=mpqp_algorithm.combinatorial_parallel,
             verbose=False
         )
         print(f"      -> Completed in {time.perf_counter() - t0:.2f}s")
+        save_agent_solutions(agent_sols_base, base_ckpt)
 
-        print("\n[4/5] Detecting facet neighbors (Parallel)...")
-        t0 = time.perf_counter()
-        find_all_agent_cr_neighbors(agent_sols, method="hyperplane", verbose=False)
-        print(f"      -> Neighbors found in {time.perf_counter() - t0:.2f}s")
+    # %% ── 4. Neighbor Detection — both methods ───────────────────────────────
+    print("\n[4/5] Computing neighbor maps (both methods)...")
+    from mpgne.cr_store import GNESolution
+    import copy
 
-        save_agent_solutions(agent_sols, agent_ckpt)
+    agent_sols_dict = {}   # "FACET-H" / "FACET-LP" -> agent_sols with neighbors
+    facet_sol_dict  = {}   # "FACET-H" / "FACET-LP" -> GNESolution
 
-        nb_counts = [sum(len(cr.facet_neighbors) for cr in s.regions) for s in agent_sols]
-        print(f"      -> Diagnostic: Neighbor counts per agent: {nb_counts}")
+    for label, method in NB_METHODS.items():
+        nb_ckpt     = os.path.join(ckpt_dir, f"agent_sols_{label}_M{M}_L{L_MAX}.pkl")
+        facet_ckpt  = os.path.join(ckpt_dir, f"facet_sol_{label}_M{M}_L{L_MAX}.pkl")
 
-        if M < OFFLINE_BFS_MAX_M:
-            print("      Building FACET-GNE explicit solution via BFS...")
-            t0 = time.perf_counter()
-            facet_res = build_gne_solution_facet(game, agent_sols, verbose=True)
-            facet_sol = facet_res.gne_sol
-            print(f"      -> Solution built in {time.perf_counter() - t0:.2f}s")
-            print(f"      -> Total combinations checked: {facet_res.n_combos_checked}")
-            save_gne_solution(facet_sol, facet_ckpt)
+        if os.path.exists(nb_ckpt) and os.path.exists(facet_ckpt):
+            print(f"  [{label}] Loading from checkpoint...")
+            agent_sols_dict[label] = load_agent_solutions(nb_ckpt)
+            facet_sol_dict[label]  = load_gne_solution(facet_ckpt)
         else:
-            print(f"      -> Skipping global BFS map (M={M} >= {OFFLINE_BFS_MAX_M}). Will solve online.")
-            from mpgne.cr_store import GNESolution
-            facet_sol = GNESolution([], game.n_p, game.N)
-            save_gne_solution(facet_sol, facet_ckpt)
-            
-        # RELOAD from disk to guarantee memory layout matches Run 2
-        agent_sols = load_agent_solutions(agent_ckpt)
-        facet_sol  = load_gne_solution(facet_ckpt)
+            print(f"  [{label}] Building neighbor map (method={method})...")
+            # Deep-copy so both methods start from clean mpQP solutions
+            sols = copy.deepcopy(agent_sols_base)
+            t0 = time.perf_counter()
+            find_all_agent_cr_neighbors(sols, method=method, verbose=False)
+            nb_counts = [sum(len(cr.facet_neighbors) for cr in s.regions) for s in sols]
+            print(f"      -> Done in {time.perf_counter()-t0:.2f}s  "
+                  f"neighbor counts/agent: {nb_counts}")
+            save_agent_solutions(sols, nb_ckpt)
+
+            if M < OFFLINE_BFS_MAX_M:
+                print(f"      -> Building GNE BFS map...")
+                t0 = time.perf_counter()
+                facet_res = build_gne_solution_facet(game, sols, verbose=False)
+                fsol = facet_res.gne_sol
+                print(f"      -> BFS done in {time.perf_counter()-t0:.2f}s  "
+                      f"({facet_res.n_combos_checked} combos checked)")
+            else:
+                print(f"      -> Skipping global BFS (M={M} >= {OFFLINE_BFS_MAX_M}). Online only.")
+                fsol = GNESolution([], game.n_p, game.N)
+
+            save_gne_solution(fsol, facet_ckpt)
+            # Reload to guarantee memory layout
+            agent_sols_dict[label] = load_agent_solutions(nb_ckpt)
+            facet_sol_dict[label]  = load_gne_solution(facet_ckpt)
+
+    # Use FACET-H as reference agent_sols for ImpGNE (same mpQP, doesn't matter)
+    agent_sols_ref = agent_sols_dict["FACET-H"]
 
     # %% ── 5. Online Closed-Loop Simulation ───────────────────────────────────
     print("\n[5/5] Running closed-loop simulation...")
@@ -113,137 +146,165 @@ if __name__ == "__main__":
     u_traj = {i: np.zeros((T_SIM, plant.subsystems[i].nu)) for i in range(M)}
     x_traj[0] = make_ic(plant, scale=0.4, rng=np.random.default_rng(2025))
 
-    facet_times       = []
     admm_times        = []
     admm_iters        = []
     pg_times          = []
     pg_iters          = []
+    impd_times        = []
+    impd_iters        = []
+    fh_times          = []    # FACET-H times
+    flp_times         = []    # FACET-LP times
+    fh_fallbacks      = 0
+    flp_fallbacks     = 0
     error_gaps        = []
-    admm_x_warm       = None
-    prev_combo        = None
+    prev_combo_H      = None
+    prev_combo_LP     = None
     admm_conv_hist_k0 = None
     pg_conv_hist_k0   = None
+    impd_conv_hist_k0 = None
 
-    # ── Minimal warmup: forces scipy/BLAS/HiGHS libs to load before timing ───
-    # Each call runs exactly 1 iteration — total cost < 10 ms.
-    # Without this, the FIRST call to solve_gne_online pays a ~400 ms
-    # one-time OS page-cache penalty (loading shared libraries from disk),
-    # making Run 1 timings differ from Run 2+.
-    print("  [warmup] Loading solver libraries (1 iter each)...")
+    # ── Warmup ────────────────────────────────────────────────────────────────
+    print(f"  [warmup] qp_solver={QP_SOLVER!r}...")
     _p0 = x_traj[0]
-    admm_solve(game, _p0, x_init=None, max_iter=1, tol=1e-20)   # warms BLAS
-    pg_solve(game, _p0,   max_iter=1,   tol=1e-20)               # warms SLSQP
-    solve_gne_online(_p0, (0,) * M, agent_sols, game)            # warms Python overheads
+    admm_solve(game, _p0, x_init=None, max_iter=1, tol=1e-20, qp_solver=QP_SOLVER)
+    pg_solve(game, _p0, max_iter=1, tol=1e-20, qp_solver=QP_SOLVER)
+    impdimc_solve(game, _p0, agent_sols_ref, max_iter=1, tol=1e-20)
+    solve_gne_online(_p0, (0,)*M, agent_sols_dict["FACET-H"],  game)
+    solve_gne_online(_p0, (0,)*M, agent_sols_dict["FACET-LP"], game)
     import scipy.optimize
-    scipy.optimize.linprog(c=[1], A_ub=[[1]], b_ub=[1], bounds=(0, 1), method='highs') # warms HiGHS
+    scipy.optimize.linprog(c=[1], A_ub=[[1]], b_ub=[1], bounds=(0,1), method='highs')
     print("  [warmup] Done — starting timed benchmark.")
+
+    def _seed_combo(p, U_admm, agent_sols):
+        """Seed initial CR combo from U_admm."""
+        _Ud, _off = {}, 0
+        for _i in range(M):
+            _n = plant.Np * plant.subsystems[_i].nu
+            _Ud[_i] = U_admm[_off:_off+_n]; _off += _n
+        _wc = []
+        for _i in range(M):
+            _th = np.concatenate([p] + [_Ud[_j] for _j in range(M) if _j != _i])
+            _vi, _best = 0, float('inf')
+            for _v, _cr in enumerate(agent_sols[_i].regions):
+                _vl = float(np.max(_cr.E @ _th - _cr.f))
+                if _vl < _best: _best, _vi = _vl, _v
+            _wc.append(_vi)
+        return tuple(_wc)
 
     for k in range(T_SIM):
         p = x_traj[k]
 
-        # ── Benchmark 1: ADMM cold-start ──────────────────────────────────────
-        t0_admm = time.perf_counter()
-        res_admm = admm_solve(game, p, x_init=None, max_iter=2000, tol=1e-4)
-        admm_times.append(time.perf_counter() - t0_admm)
+        # ── ADMM ──────────────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        res_admm = admm_solve(game, p, x_init=None, max_iter=2000, tol=1e-4,
+                              qp_solver=QP_SOLVER)
+        admm_times.append(time.perf_counter() - t0)
         admm_iters.append(res_admm.n_iter)
-        U_admm      = res_admm.x_stacked
-        admm_x_warm = U_admm.copy()
-        if k == 0:
-            admm_conv_hist_k0 = res_admm.primal_hist
+        U_admm = res_admm.x_stacked
+        if k == 0: admm_conv_hist_k0 = res_admm.primal_hist
 
-        # ── Benchmark 2: Projected Gradient / Jacobi BR ───────────────────────
-        t0_pg = time.perf_counter()
-        res_pg = pg_solve(game, p, max_iter=2000, tol=1e-4)
-        pg_times.append(time.perf_counter() - t0_pg)
+        # ── Jacobi BR ─────────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        res_pg = pg_solve(game, p, max_iter=2000, tol=1e-4, qp_solver=QP_SOLVER)
+        pg_times.append(time.perf_counter() - t0)
         pg_iters.append(res_pg.n_iter)
-        if k == 0:
-            pg_conv_hist_k0 = res_pg.conv_hist
+        if k == 0: pg_conv_hist_k0 = res_pg.conv_hist
 
-        # ── FACET explicit / online solve ─────────────────────────────────────
-        t0_facet = time.perf_counter()
-        used_fb  = False
+        # ── ImpGNE ────────────────────────────────────────────────────────────
+        t0 = time.perf_counter()
+        res_impd = impdimc_solve(game, p, agent_sols_ref, max_iter=200, tol=1e-4)
+        impd_times.append(time.perf_counter() - t0)
+        impd_iters.append(res_impd.n_iter)
+        if k == 0: impd_conv_hist_k0 = res_impd.conv_hist
 
-        if M < OFFLINE_BFS_MAX_M:
-            cr_idx = facet_sol.locate(p)
-            if cr_idx is not None:
-                U_explicit = facet_sol[cr_idx].evaluate(p)
-            else:
-                U_explicit = U_admm.copy()
-                used_fb    = True
+        # ── FACET-H (Hyperplane neighbors) ────────────────────────────────────
+        t0 = time.perf_counter()
+        if prev_combo_H is None:
+            prev_combo_H = _seed_combo(p, U_admm, agent_sols_dict["FACET-H"])
+        combo_H, U_H, _ = solve_gne_online(p, prev_combo_H, agent_sols_dict["FACET-H"], game)
+        if combo_H is not None:
+            U_facet_H    = U_H
+            prev_combo_H = combo_H
         else:
-            if prev_combo is None:
-                # Use U_admm (already computed above, free) to seed initial region
-                _Ud, _off = {}, 0
-                for _i in range(M):
-                    _n = plant.Np * plant.subsystems[_i].nu
-                    _Ud[_i] = U_admm[_off:_off+_n]; _off += _n
-                _wc = []
-                for _i in range(M):
-                    _th = np.concatenate([p] + [_Ud[_j] for _j in range(M) if _j != _i])
-                    _vi, _best = 0, float('inf')
-                    for _v, _cr in enumerate(agent_sols[_i].regions):
-                        _vl = float(np.max(_cr.E @ _th - _cr.f))
-                        if _vl < _best: _best, _vi = _vl, _v
-                    _wc.append(_vi)
-                prev_combo = tuple(_wc)
+            U_facet_H    = U_admm.copy()
+            fh_fallbacks += 1
+            prev_combo_H  = None
+        fh_times.append(time.perf_counter() - t0)
 
-            combo, U_star, _ = solve_gne_online(p, prev_combo, agent_sols, game)
-            if combo is not None:
-                U_explicit  = U_star
-                prev_combo  = combo
-                admm_x_warm = U_star
-            else:
-                U_explicit = U_admm.copy()   # free — already computed
-                used_fb    = True
-                prev_combo = None
+        # ── FACET-LP (LP facet neighbors) ─────────────────────────────────────
+        t0 = time.perf_counter()
+        if prev_combo_LP is None:
+            prev_combo_LP = _seed_combo(p, U_admm, agent_sols_dict["FACET-LP"])
+        combo_LP, U_LP, _ = solve_gne_online(p, prev_combo_LP, agent_sols_dict["FACET-LP"], game)
+        if combo_LP is not None:
+            U_facet_LP    = U_LP
+            prev_combo_LP = combo_LP
+        else:
+            U_facet_LP     = U_admm.copy()
+            flp_fallbacks += 1
+            prev_combo_LP  = None
+        flp_times.append(time.perf_counter() - t0)
 
-        facet_times.append(time.perf_counter() - t0_facet)
-        error_gaps.append(np.linalg.norm(U_explicit - U_admm))
+        error_gaps.append(np.linalg.norm(U_facet_H - U_admm))
 
-        # ── Plant step ────────────────────────────────────────────────────────
-        u_k = {i: U_explicit[game.x_slice(i)][:plant.subsystems[i].nu]
-               for i in range(M)}
-        for i in range(M):
-            u_traj[i][k] = u_k[i]
+        # ── Plant step (use FACET-H as control) ───────────────────────────────
+        u_k = {i: U_facet_H[game.x_slice(i)][:plant.subsystems[i].nu] for i in range(M)}
+        for i in range(M): u_traj[i][k] = u_k[i]
         x_traj[k + 1] = plant.step(x_traj[k], u_k)
 
         if (k + 1) % 20 == 0 or k == 0:
             print(f"  step {k+1:3d}/{T_SIM}  "
                   f"ADMM:{res_admm.n_iter:4d}itr  "
                   f"BR:{res_pg.n_iter:4d}itr  "
-                  f"FACET:{facet_times[-1]*1000:.3f}ms"
-                  f"{'  [fallback]' if used_fb else ''}")
+                  f"ImpGNE:{res_impd.n_iter:3d}itr  "
+                  f"FACET-H:{fh_times[-1]*1000:.3f}ms  "
+                  f"FACET-LP:{flp_times[-1]*1000:.3f}ms")
 
     # %% ── 6. Performance Summary ─────────────────────────────────────────────
-    print("\n" + "=" * 75)
-    print("  PERFORMANCE COMPARISON: EXPLICIT vs ITERATIVE")
-    print("=" * 75)
-    print(f"{'Method':<25} | {'Avg Time':>10} | {'Max Time':>10} | {'Avg Iters':>10}")
-    print("-" * 75)
-    print(f"{'Iterative (ADMM)':<25} | "
-          f"{np.mean(admm_times)*1000:>8.3f} ms | "
-          f"{np.max(admm_times)*1000:>8.3f} ms | "
-          f"{np.mean(admm_iters):>10.1f}")
-    print(f"{'Iterative (Jacobi BR)':<25} | "
-          f"{np.mean(pg_times)*1000:>8.3f} ms | "
-          f"{np.max(pg_times)*1000:>8.3f} ms | "
-          f"{np.mean(pg_iters):>10.1f}")
-    print(f"{'Explicit (FACET)':<25} | "
-          f"{np.mean(facet_times)*1000:>8.3f} ms | "
-          f"{np.max(facet_times)*1000:>8.3f} ms | "
-          f"{'N/A':>10}")
-    print("-" * 75)
-    print(f"  -> Speedup vs ADMM   : {np.mean(admm_times)/np.mean(facet_times):.1f}x faster")
-    print(f"  -> Speedup vs BR     : {np.mean(pg_times)/np.mean(facet_times):.1f}x faster")
-    print(f"  -> Final state norm  : {np.linalg.norm(x_traj[-1]):.2e}")
-    print(f"  -> Avg optimality gap: {np.mean(error_gaps):.2e}")
-    print("=" * 75)
+    print("\n" + "=" * 84)
+    print("  PERFORMANCE COMPARISON")
+    print("=" * 84)
+    print(f"{'Method':<28} | {'Avg Time':>10} | {'Max Time':>10} | {'Avg Iters':>10} | {'Fallbacks':>9}")
+    print("-" * 84)
+    def _row(name, times, iters=None, fb=None):
+        istr = f"{np.mean(iters):>10.1f}" if iters is not None else f"{'N/A':>10}"
+        fbstr = f"{fb:>9}" if fb is not None else f"{'—':>9}"
+        print(f"{name:<28} | {np.mean(times)*1000:>8.3f} ms | "
+              f"{np.max(times)*1000:>8.3f} ms | {istr} | {fbstr}")
+
+    _row("ADMM",       admm_times, admm_iters)
+    _row("Jacobi BR",  pg_times,   pg_iters)
+    _row("ImpGNE",     impd_times, impd_iters)
+    _row("FACET-H  (Hyperplane)", fh_times,  fb=fh_fallbacks)
+    _row("FACET-LP (LP Facet)",   flp_times, fb=flp_fallbacks)
+    print("-" * 84)
+    ref = np.mean(fh_times)
+    print(f"  -> FACET-H  speedup vs ADMM    : {np.mean(admm_times)/ref:.1f}x")
+    print(f"  -> FACET-H  speedup vs Jacobi  : {np.mean(pg_times)/ref:.1f}x")
+    print(f"  -> FACET-H  speedup vs ImpGNE  : {np.mean(impd_times)/ref:.1f}x")
+    print(f"  -> FACET-LP speedup vs ADMM    : {np.mean(admm_times)/np.mean(flp_times):.1f}x")
+    print(f"  -> FACET-LP vs FACET-H         : {np.mean(fh_times)/np.mean(flp_times):.2f}x")
+    print(f"  -> Final state norm            : {np.linalg.norm(x_traj[-1]):.2e}")
+    print(f"  -> Avg optimality gap (FACET-H): {np.mean(error_gaps):.2e}")
+    print("=" * 84)
 
     # %% ── 7. Plots ───────────────────────────────────────────────────────────
     print("\nGenerating plots...")
     C_ADMM  = "#E07B54"
     C_PG    = "#5B8DB8"
-    C_FACET = "#4CAF82"
+    C_IMPD  = "#C97BD4"
+    C_FH    = "#4CAF82"   # FACET-H  — green
+    C_FLP   = "#FFD700"   # FACET-LP — gold
+
+    def _style(ax, title, xlabel, ylabel):
+        ax.set_facecolor("#16213e"); ax.tick_params(colors='white')
+        ax.spines[:].set_color("#444")
+        for lbl in ax.get_xticklabels() + ax.get_yticklabels():
+            lbl.set_color('white')
+        ax.set_title(title, color='white', fontsize=11, fontweight='bold', pad=8)
+        ax.set_xlabel(xlabel, color='white', fontsize=10)
+        ax.set_ylabel(ylabel, color='white', fontsize=10)
+        ax.grid(True, linestyle='--', alpha=0.35, color='#888')
 
     # Figure 1: Closed-loop trajectories
     fig1, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
@@ -271,21 +332,12 @@ if __name__ == "__main__":
     fig1.savefig(p1, dpi=200, bbox_inches='tight', facecolor=fig1.get_facecolor())
     print(f"Plot saved: {p1}")
 
-    # Figure 2: Benchmark comparison (2×2)
-    fig2 = plt.figure(figsize=(14, 10))
+    # Figure 2: Benchmark (2×2)
+    fig2 = plt.figure(figsize=(16, 10))
     fig2.patch.set_facecolor("#1a1a2e")
     gs = gridspec.GridSpec(2, 2, figure=fig2, hspace=0.42, wspace=0.35)
 
-    def _style(ax, title, xlabel, ylabel):
-        ax.set_facecolor("#16213e"); ax.tick_params(colors='white')
-        ax.spines[:].set_color("#444")
-        for lbl in ax.get_xticklabels() + ax.get_yticklabels():
-            lbl.set_color('white')
-        ax.set_title(title, color='white', fontsize=11, fontweight='bold', pad=8)
-        ax.set_xlabel(xlabel, color='white', fontsize=10)
-        ax.set_ylabel(ylabel, color='white', fontsize=10)
-        ax.grid(True, linestyle='--', alpha=0.35, color='#888')
-
+    # [0,0] Convergence at k=0
     ax_c = fig2.add_subplot(gs[0, 0])
     if admm_conv_hist_k0:
         ax_c.semilogy(admm_conv_hist_k0, color=C_ADMM, lw=2,
@@ -293,47 +345,59 @@ if __name__ == "__main__":
     if pg_conv_hist_k0:
         ax_c.semilogy(pg_conv_hist_k0, color=C_PG, lw=2,
                       label=f"Jacobi BR ({len(pg_conv_hist_k0)} itr)")
+    if impd_conv_hist_k0:
+        ax_c.semilogy(impd_conv_hist_k0, color=C_IMPD, lw=2, ls='--',
+                      label=f"ImpGNE ({len(impd_conv_hist_k0)} itr)")
     ax_c.axhline(1e-4, color='white', ls=':', lw=1, alpha=0.6, label="tol=1e-4")
     _style(ax_c, "Convergence at Step k=0", "Iteration", "Residual / ‖Δx‖")
     ax_c.legend(fontsize=9, facecolor='#1a1a2e', labelcolor='white', framealpha=0.7)
 
+    # [0,1] Iterations per step
     ax_i = fig2.add_subplot(gs[0, 1])
     ax_i.plot(admm_iters, color=C_ADMM, lw=1.5, label="ADMM")
     ax_i.plot(pg_iters,   color=C_PG,   lw=1.5, label="Jacobi BR")
+    ax_i.plot(impd_iters, color=C_IMPD, lw=1.5, ls='--', label="ImpGNE")
     _style(ax_i, "Iterations per Time Step", "Time step $k$", "# Iterations")
     ax_i.legend(fontsize=9, facecolor='#1a1a2e', labelcolor='white', framealpha=0.7)
 
+    # [1,0] Solve-time boxplot
     ax_t = fig2.add_subplot(gs[1, 0])
     bp = ax_t.boxplot(
         [np.array(admm_times)*1000, np.array(pg_times)*1000,
-         np.array(facet_times)*1000],
+         np.array(impd_times)*1000,
+         np.array(fh_times)*1000, np.array(flp_times)*1000],
         patch_artist=True, widths=0.5,
         medianprops=dict(color='white', linewidth=2),
         whiskerprops=dict(color='#aaa'), capprops=dict(color='#aaa'),
         flierprops=dict(marker='o', color='#aaa', markersize=3),
     )
-    for patch, c in zip(bp['boxes'], [C_ADMM, C_PG, C_FACET]):
+    for patch, c in zip(bp['boxes'], [C_ADMM, C_PG, C_IMPD, C_FH, C_FLP]):
         patch.set_facecolor(c); patch.set_alpha(0.75)
     ax_t.set_yscale('log')
-    ax_t.set_xticks([1, 2, 3])
-    ax_t.set_xticklabels(["ADMM\n(warm)", "Jacobi BR\n(cold)", "FACET-GNE\n(explicit)"],
-                          color='white', fontsize=9)
+    ax_t.set_xticks([1, 2, 3, 4, 5])
+    ax_t.set_xticklabels(["ADMM", "Jacobi\nBR", "ImpGNE", "FACET-H\n(Hyper)", "FACET-LP\n(LP)"],
+                          color='white', fontsize=8)
     _style(ax_t, "Solve-Time Distribution (log scale)", "Method", "Time (ms)")
 
+    # [1,1] Speedup bars vs FACET-H
     ax_s = fig2.add_subplot(gs[1, 1])
-    su_a = np.mean(admm_times) / np.mean(facet_times)
-    su_p = np.mean(pg_times)   / np.mean(facet_times)
-    bars = ax_s.bar(["ADMM\nvs FACET", "Jacobi BR\nvs FACET"],
-                    [su_a, su_p], color=[C_ADMM, C_PG],
-                    alpha=0.8, width=0.4, edgecolor='white', linewidth=0.8)
-    for bar, val in zip(bars, [su_a, su_p]):
+    ref_t = np.mean(fh_times)
+    su_vals   = [np.mean(admm_times)/ref_t, np.mean(pg_times)/ref_t,
+                 np.mean(impd_times)/ref_t, np.mean(flp_times)/ref_t]
+    su_labels = ["ADMM\nvs FACET-H", "Jacobi BR\nvs FACET-H",
+                 "ImpGNE\nvs FACET-H", "FACET-LP\nvs FACET-H"]
+    su_colors = [C_ADMM, C_PG, C_IMPD, C_FLP]
+    bars = ax_s.bar(su_labels, su_vals, color=su_colors,
+                    alpha=0.8, width=0.5, edgecolor='white', linewidth=0.8)
+    for bar, val in zip(bars, su_vals):
         ax_s.text(bar.get_x() + bar.get_width()/2, bar.get_height()*1.02,
                   f"{val:.1f}×", ha='center', va='bottom',
-                  color='white', fontsize=12, fontweight='bold')
-    _style(ax_s, "FACET-GNE Speedup vs Iterative", "Comparison", "Speedup (×)")
+                  color='white', fontsize=11, fontweight='bold')
+    _style(ax_s, "FACET-H Speedup vs Other Methods", "Comparison", "Speedup (×)")
 
-    fig2.suptitle(f"Benchmark: FACET-GNE vs Iterative Solvers (M={M}, L_max={L_MAX})",
-                  color='white', fontsize=13, fontweight='bold', y=1.01)
+    fig2.suptitle(
+        f"Benchmark: FACET-H vs FACET-LP vs Iterative Solvers  (M={M}, L_max={L_MAX})",
+        color='white', fontsize=13, fontweight='bold', y=1.01)
     p2 = os.path.join(os.path.dirname(__file__), "demo_benchmark.png")
     fig2.savefig(p2, dpi=200, bbox_inches='tight', facecolor=fig2.get_facecolor())
     print(f"Plot saved: {p2}")
