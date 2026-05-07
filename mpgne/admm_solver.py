@@ -117,14 +117,15 @@ def _solve_agent_xupdate_osqp(
     ai,
     l_i: np.ndarray,
     Q_aug: np.ndarray,
+    A_stack: np.ndarray,
     rhs: np.ndarray,
 ) -> np.ndarray:
     """Solve agent x-update QP via OSQP (cold-start, no warm-starting)."""
     n = ai.n_x
-    m = len(rhs)
+    m = A_stack.shape[0]
 
     P = sp.csc_matrix(np.triu(Q_aug))          # upper-triangular sparse
-    A = sp.csc_matrix(ai.A_loc)                # (m, n)
+    A = sp.csc_matrix(A_stack)                 # (m, n)
     lb = -np.inf * np.ones(m)                  # one-sided: A x <= rhs
 
     prob = _osqp_lib.OSQP()
@@ -143,13 +144,14 @@ def _solve_agent_xupdate_osqp(
     if res.info.status in ("solved", "solved_inaccurate") and res.x is not None:
         return res.x
     # OSQP failed — silently fall back to SLSQP
-    return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, rhs)
+    return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, A_stack, rhs)
 
 
 def _solve_agent_xupdate_slsqp(
     ai,
     l_i: np.ndarray,
     Q_aug: np.ndarray,
+    A_stack: np.ndarray,
     rhs: np.ndarray,
     x0: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -160,10 +162,11 @@ def _solve_agent_xupdate_slsqp(
     def jac(x):
         return Q_aug @ x + l_i
 
+    r = rhs.copy()
     constraints = [{
         'type': 'ineq',
-        'fun':  lambda x: rhs - ai.A_loc @ x,
-        'jac':  lambda x: -ai.A_loc,
+        'fun':  lambda x, r=r:  r - A_stack @ x,
+        'jac':  lambda x:          -A_stack,
     }]
 
     x_init = np.zeros(ai.n_x) if x0 is None else x0.copy()
@@ -176,21 +179,50 @@ def _solve_agent_xupdate_slsqp(
     return res.x
 
 
+def _build_state_constraint_rhs(ai, p, x_list, game, i):
+    """Build RHS for state constraints on agent i given fixed U_{-i}."""
+    x_lb_rep  = ai.x_lb_rep        # (Np*nx,)
+    x_ub_rep  = ai.x_ub_rep        # (Np*nx,)
+    nx = game.n_p
+
+    # Assemble U_{-i} in the correct order
+    others = [j for j in range(game.N) if j != i]
+    U_neg = np.concatenate([x_list[j] for j in others])  # (n_x_neg,)
+
+    # M_theta = [Phi_x | Gamma_{j1} | ...] in dimpc ordering
+    # Reorder to GNE ordering [Gamma_others | Phi_x] to match θ_i = [U_{-i}; p]
+    M_theta_i = ai.M_theta          # (Np*nx, nx + n_x_neg)
+    M_theta_gne = np.hstack([M_theta_i[:, nx:], M_theta_i[:, :nx]])
+
+    theta_i = np.concatenate([U_neg, p])                    # (n_x_neg + n_p,)
+    X_coupling = M_theta_gne @ theta_i                      # (Np*nx,)
+    # State constraints: x_lb_rep <= Gamma_i U_i + X_coupling <= x_ub_rep
+    # → ±Gamma_i U_i <= ±(x_{ub/lb}_rep - X_coupling)
+    rhs_upper = x_ub_rep - X_coupling
+    rhs_lower = -x_lb_rep + X_coupling
+    return np.concatenate([rhs_upper, rhs_lower])
+
+
 def _solve_agent_xupdate(
     game: GNEGame,
     i: int,
     p: np.ndarray,
-    z_i: np.ndarray,
-    lambda_i: np.ndarray,
+    z_i: np.ndarray | None,
+    lambda_i: np.ndarray | None,
     rho: float,
+    x_list: list[np.ndarray] | None = None,
     x0: np.ndarray | None = None,
     qp_solver: str = "osqp",
 ) -> np.ndarray:
     """
     Solve agent i's x-update QP.
 
-    min  ½ x_i^T (Q_i + ρ C_i^T C_i) x_i + l_i^T x_i
-    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
+    With coupling:  min  ½ x_i^T (Q_i + ρ C_i^T C_i) x_i + l_i^T x_i
+                    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
+
+    Without coupling: min ½ x_i^T Q_i x_i + (c_i + F_i p)^T x_i
+                      s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p
+                           ±Γ_i x_i ≤ ±(x_{ub/lb}_rep - X_coupling)
 
     Parameters
     ----------
@@ -198,19 +230,50 @@ def _solve_agent_xupdate(
     """
     ai = game.agents[i]
 
-    # Augmented Hessian: Q_i + ρ C_i^T C_i
-    Q_aug = ai.Q + rho * ai.C.T @ ai.C            # (n_x_i, n_x_i)
+    # Augmented Hessian
+    if ai.C is not None and game.n_coupling > 0:
+        Q_aug = ai.Q + rho * ai.C.T @ ai.C
+        l_i = ai.c + ai.F @ p + ai.C.T @ lambda_i - rho * ai.C.T @ z_i
+    else:
+        Q_aug = ai.Q.copy()
+        # Cost: ½ x_i^T Q_i x_i + (F_cross_i @ U_{-i} + F_i @ p)^T x_i
+        # The F_cross term depends on U_{-i} which is in x_list
+        if ai.F_cross is not None and x_list is not None:
+            others = [j for j in range(game.N) if j != i]
+            U_neg = np.concatenate([x_list[j] for j in others])
+            l_i = ai.c + ai.F_cross @ U_neg + ai.F @ p
+        else:
+            l_i = ai.c + ai.F @ p
 
-    # Augmented linear term
-    l_i = ai.c + ai.F @ p + ai.C.T @ lambda_i - rho * ai.C.T @ z_i
+    # Build constraint stack
+    A_parts = [ai.A_loc]
+    rhs_parts = [ai.b_loc + ai.S_loc @ p]
 
-    # Local constraint RHS: b_loc + S_loc p
-    rhs = ai.b_loc + ai.S_loc @ p
+    # State constraints
+    if ai.has_state_constraints and x_list is not None:
+        rhs_state = _build_state_constraint_rhs(ai, p, x_list, game, i)
+        n_half = len(rhs_state) // 2
+        A_parts.append(ai.Gamma_self)
+        A_parts.append(-ai.Gamma_self)
+        rhs_parts.append(rhs_state[:n_half])    # upper bound
+        rhs_parts.append(rhs_state[n_half:])    # lower bound
+
+    # Coupling constraint (if present)
+    if ai.C is not None and game.n_coupling > 0 and x_list is not None:
+        rhs_coup = game.d + game.S_coup @ p
+        for j in range(game.N):
+            if j != i and game.agents[j].C is not None:
+                rhs_coup = rhs_coup - game.agents[j].C @ x_list[j]
+        A_parts.append(ai.C)
+        rhs_parts.append(rhs_coup)
+
+    A_stack = np.vstack(A_parts)
+    rhs     = np.concatenate(rhs_parts)
 
     if qp_solver == "osqp" and _OSQP_AVAILABLE:
-        return _solve_agent_xupdate_osqp(ai, l_i, Q_aug, rhs)
+        return _solve_agent_xupdate_osqp(ai, l_i, Q_aug, A_stack, rhs)
     else:
-        return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, rhs, x0=x0)
+        return _solve_agent_xupdate_slsqp(ai, l_i, Q_aug, A_stack, rhs, x0=x0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,17 +372,20 @@ def admm_solve(
     """
     Solve the GNE for a specific parameter p using ADMM.
 
+    With coupling constraint: standard ADMM (x/z/lambda updates).
+    Without coupling: Jacobi best-response iteration (state constraints
+    couple agents through dynamics).
+
     Parameters
     ----------
     game      : GNEGame
     p         : parameter vector (n_p,)
     rho       : ADMM penalty parameter (> 0).
-    max_iter  : maximum ADMM iterations
-    tol       : stopping threshold for max(primal_res, dual_res)
+    max_iter  : maximum iterations
+    tol       : stopping threshold for max(primal_res, dual_res) or ||x_new - x||
     verbose   : print per-iteration summary
     x_init    : warm-start list of x_i^0  (if None, initialise at zeros)
     qp_solver : "osqp" (default) or "slsqp" — inner QP solver for x-update.
-                Both use cold-start (no warm-starting within the QP solver).
 
     Returns
     -------
@@ -333,7 +399,7 @@ def admm_solve(
 
     p   = np.asarray(p, dtype=float).ravel()
     N   = game.N
-    rhs = game.d + game.S_coup @ p
+    has_coupling = (game.n_coupling > 0)
 
     # ── initialise ────────────────────────────────────────────────────────────
     if x_init is None:
@@ -348,8 +414,14 @@ def admm_solve(
     else:
         x_list = [x.copy() for x in x_init]
 
-    z_list  = [game.agents[i].C @ x_list[i] for i in range(N)]
-    lambdas = [np.zeros(game.n_coupling) for _ in range(N)]
+    if has_coupling:
+        rhs = game.d + game.S_coup @ p
+        z_list  = [game.agents[i].C @ x_list[i] for i in range(N)]
+        lambdas = [np.zeros(game.n_coupling) for _ in range(N)]
+    else:
+        rhs = None
+        z_list = []
+        lambdas = []
 
     primal_hist: list[float] = []
     dual_hist:   list[float] = []
@@ -360,43 +432,71 @@ def admm_solve(
     t0 = time.perf_counter()
 
     for k in range(max_iter):
-        z_prev = [z.copy() for z in z_list]
+        if has_coupling:
+            z_prev = [z.copy() for z in z_list]
 
         # ── x-update (each agent independently) ──────────────────────────────
-        x_new = [
-            _solve_agent_xupdate(game, i, p, z_list[i], lambdas[i], rho,
-                                 x0=x_list[i], qp_solver=qp_solver)
-            for i in range(N)
-        ]
+        if has_coupling:
+            x_new = [
+                _solve_agent_xupdate(game, i, p, z_list[i], lambdas[i], rho,
+                                     x_list=x_list, x0=x_list[i], qp_solver=qp_solver)
+                for i in range(N)
+            ]
+        else:
+            x_new = [
+                _solve_agent_xupdate(game, i, p, None, None, rho,
+                                     x_list=x_list, x0=x_list[i], qp_solver=qp_solver)
+                for i in range(N)
+            ]
 
-        # ── z-update (global projection) ─────────────────────────────────────
-        z_new = _z_update(game, p, x_new, lambdas, rho)
-
-        # ── λ-update ──────────────────────────────────────────────────────────
-        lambdas = _lambda_update(game, x_new, z_new, lambdas, rho)
+        if has_coupling:
+            # ── z-update (global projection) ─────────────────────────────────
+            z_new = _z_update(game, p, x_new, lambdas, rho)
+            # ── λ-update ─────────────────────────────────────────────────────
+            lambdas = _lambda_update(game, x_new, z_new, lambdas, rho)
+            z_list = z_new
 
         x_list = x_new
-        z_list = z_new
 
-        # ── residuals ─────────────────────────────────────────────────────────
-        primal_res, dual_res = _compute_residuals(game, x_list, z_list, z_prev, rho)
-        primal_hist.append(primal_res)
-        dual_hist.append(dual_res)
+        # ── residuals / convergence ──────────────────────────────────────────
+        if has_coupling:
+            primal_res, dual_res = _compute_residuals(game, x_list, z_list, z_prev, rho)
+            primal_hist.append(primal_res)
+            dual_hist.append(dual_res)
+            converged = max(primal_res, dual_res) < tol
+        else:
+            # Best-response convergence: ||x_new - x_old||
+            if k > 0:
+                delta = float(np.linalg.norm(
+                    np.concatenate(x_new) - np.concatenate(x_prev_best)
+                ))
+                primal_hist.append(delta)
+                dual_hist.append(0.0)
+                converged = delta < tol
+            else:
+                primal_hist.append(np.inf)
+                dual_hist.append(0.0)
+            x_prev_best = [x.copy() for x in x_new]
 
-        if verbose and (k % 50 == 0 or k == max_iter - 1):
-            agg  = sum(game.agents[i].C @ x_list[i] for i in range(N))
-            viol = float(np.max(np.maximum(0.0, agg - rhs)))
-            print(f"  [ADMM] iter {k:4d}  r={primal_res:.2e}  s={dual_res:.2e}"
-                  f"  coupling_viol={viol:.2e}")
+        if verbose and (k % 50 == 0 or k == max_iter - 1 or converged):
+            if has_coupling:
+                agg  = sum(game.agents[i].C @ x_list[i] for i in range(N))
+                viol = float(np.max(np.maximum(0.0, agg - rhs)))
+                print(f"  [ADMM] iter {k:4d}  r={primal_res:.2e}  s={dual_res:.2e}"
+                      f"  coupling_viol={viol:.2e}")
+            else:
+                print(f"  [ADMM/BR] iter {k:4d}  delta={primal_hist[-1]:.2e}")
 
-        if max(primal_res, dual_res) < tol:
-            converged = True
+        if converged:
             break
 
     solve_time = time.perf_counter() - t0
 
-    agg = sum(game.agents[i].C @ x_list[i] for i in range(N))
-    coupling_viol = float(np.max(np.maximum(0.0, agg - rhs)))
+    if has_coupling:
+        agg = sum(game.agents[i].C @ x_list[i] for i in range(N))
+        coupling_viol = float(np.max(np.maximum(0.0, agg - rhs)))
+    else:
+        coupling_viol = 0.0
 
     return ADMMResult(
         x_sol=x_list,

@@ -70,11 +70,15 @@ class Agent:
     Q: np.ndarray
     c: np.ndarray
     F: np.ndarray
-    C: np.ndarray
     A_loc: np.ndarray
     b_loc: np.ndarray
     S_loc: np.ndarray
+    C: np.ndarray | None = field(default=None)
     F_cross: np.ndarray | None = field(default=None)
+    Gamma_self: np.ndarray | None = field(default=None)
+    M_theta: np.ndarray | None = field(default=None)
+    x_lb_rep: np.ndarray | None = field(default=None)
+    x_ub_rep: np.ndarray | None = field(default=None)
 
     @property
     def n_p(self) -> int:
@@ -82,11 +86,15 @@ class Agent:
 
     @property
     def n_coupling(self) -> int:
-        return self.C.shape[0]
+        return self.C.shape[0] if self.C is not None else 0
 
     @property
     def n_loc(self) -> int:
         return self.A_loc.shape[0]
+
+    @property
+    def has_state_constraints(self) -> bool:
+        return self.Gamma_self is not None
 
     def local_cost(self, x_i: np.ndarray, p: np.ndarray) -> float:
         """Evaluate J_i for given x_i and p."""
@@ -124,10 +132,10 @@ class GNEGame:
     """
 
     agents: list[Agent]
-    d: np.ndarray
-    S_coup: np.ndarray
-    p_lb: np.ndarray
-    p_ub: np.ndarray
+    d: np.ndarray | None = field(default=None)
+    S_coup: np.ndarray | None = field(default=None)
+    p_lb: np.ndarray = field(default_factory=lambda: np.array([]))
+    p_ub: np.ndarray = field(default_factory=lambda: np.array([]))
 
     @property
     def N(self) -> int:
@@ -141,8 +149,8 @@ class GNEGame:
 
     @property
     def n_coupling(self) -> int:
-        """Number of shared coupling constraints."""
-        return self.d.shape[0]
+        """Number of shared coupling constraints (0 if no coupling)."""
+        return self.d.shape[0] if self.d is not None else 0
 
     @property
     def n_x_total(self) -> int:
@@ -154,16 +162,24 @@ class GNEGame:
         start = sum(self.agents[j].n_x for j in range(i))
         return slice(start, start + self.agents[i].n_x)
 
-    def coupling_lhs(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate sum_i C_i x_i for stacked x = [x_0; ...; x_{N-1}]."""
+    def coupling_lhs(self, x: np.ndarray) -> np.ndarray | None:
+        """Evaluate sum_i C_i x_i for stacked x = [x_0; ...; x_{N-1}]. Returns None if no coupling."""
+        if self.d is None:
+            return None
         result = np.zeros(self.n_coupling)
         for a in self.agents:
-            result += a.C @ x[self.x_slice(a.index)]
+            if a.C is not None:
+                result += a.C @ x[self.x_slice(a.index)]
         return result
 
     def coupling_feasible(self, x: np.ndarray, p: np.ndarray, tol: float = 1e-8) -> bool:
         """True if stacked x satisfies the shared coupling constraint for parameter p."""
-        return bool(np.all(self.coupling_lhs(x) <= self.d + self.S_coup @ p + tol))
+        if self.d is None:
+            return True
+        lhs = self.coupling_lhs(x)
+        if lhs is None:
+            return True
+        return bool(np.all(lhs <= self.d + self.S_coup @ p + tol))
 
     def all_feasible(self, x: np.ndarray, p: np.ndarray, tol: float = 1e-8) -> bool:
         """True if all local and coupling constraints are satisfied."""
@@ -245,8 +261,8 @@ def make_random_game(
         c_i = np.zeros(n_x)
         F_i = np.zeros((n_x, n_p))
 
-        # Coupling block: equal-weight sum
-        C_i = (coupling_scale / N) * np.ones((n_coupling, n_x))
+        # Coupling block: equal-weight sum (None if n_coupling == 0)
+        C_i = (coupling_scale / N) * np.ones((n_coupling, n_x)) if n_coupling > 0 else None
 
         # Local box constraints: -x_bound <= x_i <= x_bound
         # Written as [I; -I] x_i <= [x_bound * 1; x_bound * 1]
@@ -267,8 +283,8 @@ def make_random_game(
         ))
 
     # Shared coupling RHS: d = coupling_scale * x_bound (feasible for any x in box)
-    d = coupling_scale * x_bound * np.ones(n_coupling)
-    S_coup = np.zeros((n_coupling, n_p))
+    d = coupling_scale * x_bound * np.ones(n_coupling) if n_coupling > 0 else None
+    S_coup = np.zeros((n_coupling, n_p)) if n_coupling > 0 else None
 
     # Parameter space box
     p_lb = -p_bound * np.ones(n_p)

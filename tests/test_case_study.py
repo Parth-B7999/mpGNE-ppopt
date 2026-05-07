@@ -50,7 +50,7 @@ ALGO        = mpqp_algorithm.combinatorial_parallel   # PPOPT mpQP algorithm
 ADMM_RHO    = 0.5        # ADMM penalty parameter (reduced for slower/accurate convergence)
 ADMM_ITERS  = 1000       # max ADMM iterations per step
 ADMM_TOL    = 1e-8       # ADMM convergence tolerance (tightened for paper benchmark)
-L_MAX       = 5.0        # aggregate coupling limit (sum_j u_j(k) ≤ L_MAX)
+# L_MAX coupling constraint removed — state bounds now couple agents
 FACET_METHOD = "hyperplane"   # "hyperplane" (fast) or "lp" (rigorous)
 
 SEED        = 2025
@@ -67,7 +67,7 @@ from mpgne.admm_solver      import admm_solve
 from mpgne.facet_gne        import find_all_agent_cr_neighbors, build_gne_solution_facet
 
 print(f"Config: N_PLANTS={N_PLANTS}, T_SIM={T_SIM}, M_LIST={M_LIST}")
-print(f"Algorithm: {ALGO}  |  L_MAX={L_MAX}  |  ADMM_RHO={ADMM_RHO}")
+print(f"Algorithm: {ALGO}  |  ADMM_RHO={ADMM_RHO}")
 print(f"Checkpoints → {CKPT_DIR}\n")
 
 
@@ -349,7 +349,7 @@ def run_one_plant(plant, x0, M, plant_idx):
     # ── build GNE game from plant ────────────────────────────────────────────────────
     try:
         Q_list, R_list, P_list = default_local_weights(plant)
-        game = make_gne_game_from_plant(plant, L_max=L_MAX,
+        game = make_gne_game_from_plant(plant,
                                         Q_list=Q_list, R_list=R_list, P_list=P_list)
     except Exception as e:
         result["error"] = f"game build: {e}"
@@ -484,7 +484,7 @@ def run_one_plant(plant, x0, M, plant_idx):
 
 def run_case_study_M(M: int) -> list[dict]:
     print(f"\n{'='*65}")
-    print(f"  M = {M} agents  |  N = {N_PLANTS} plants  |  T = {T_SIM}  |  L_MAX={L_MAX}")
+    print(f"  M = {M} agents  |  N = {N_PLANTS} plants  |  T = {T_SIM}")
     print(f"{'='*65}")
 
     plants = make_random_plants(M, N_PLANTS, seed=SEED)
@@ -565,7 +565,7 @@ def _collect(results, method, key):
 
 def print_summary(all_M_results):
     print(f"\n\n{'='*80}")
-    print(f"  AGGREGATE SUMMARY  —  N={N_PLANTS} plants/M, T={T_SIM}, L_MAX={L_MAX}")
+    print(f"  AGGREGATE SUMMARY  —  N={N_PLANTS} plants/M, T={T_SIM}")
     print(f"{'='*80}")
 
     nan = float('nan')

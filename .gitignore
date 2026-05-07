@@ -22,6 +22,7 @@ var/
 # Simulation artifacts
 checkpoints_demo/
 checkpoints_gne/
+tests/full_case_study_data/
 graphify-out/
 demo_trajectory.png
 demo_benchmark.png

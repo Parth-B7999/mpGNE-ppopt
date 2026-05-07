@@ -9,10 +9,10 @@ gradient step for a quadratic game.
 
 Jacobi Best-Response Iteration
 ───────────────────────────────
-    x_i^{k+1} = argmin  ½ x_i^T Q_i x_i  +  (c_i + F_i p)^T x_i
-                s.t.    A_loc_i x_i ≤ b_loc_i + S_loc_i p          (local)
-                        C_i x_i     ≤ d + S_coup p - Σ_{j≠i} C_j x_j^k
-                                                                   (coupling)
+    x_i^{k+1} = argmin  ½ x_i^T Q_i x_i  +  (F_cross_i U_{-i}^k + c_i + F_i p)^T x_i
+                s.t.    A_loc_i x_i ≤ b_loc_i + S_loc_i p          (input bounds)
+                        ±Γ_i x_i    ≤ rhs_state_i(U_{-i}^k, p)     (state bounds)
+                        C_i x_i     ≤ rhs_coup_i(U_{-i}^k, p)      (coupling, if any)
 
 All agents use x^k (not x^{k+1}) on the right-hand side — the Jacobi rule.
 
@@ -87,24 +87,19 @@ class PGResult:
 def _solve_agent_br_osqp(
     ai,
     lin: np.ndarray,
-    rhs_loc: np.ndarray,
-    rhs_coup_i: np.ndarray,
+    A_stack: np.ndarray,
+    rhs: np.ndarray,
 ) -> np.ndarray:
     """Solve agent best-response QP via OSQP (cold-start, no warm-starting)."""
-    n      = ai.n_x
-    m_loc  = len(rhs_loc)
-    m_coup = len(rhs_coup_i)
-
-    # Stack constraints: [A_loc; C_i] x <= [rhs_loc; rhs_coup_i]
-    A_stack = sp.csc_matrix(np.vstack([ai.A_loc, ai.C]))
-    u_stack = np.concatenate([rhs_loc, rhs_coup_i])
-    l_stack = -np.inf * np.ones(m_loc + m_coup)
+    m = A_stack.shape[0]
 
     P = sp.csc_matrix(np.triu(ai.Q))   # upper-triangular sparse
+    A = sp.csc_matrix(A_stack)
+    l_stack = -np.inf * np.ones(m)
 
     prob = _osqp_lib.OSQP()
     prob.setup(
-        P, lin, A_stack, l_stack, u_stack,
+        P, lin, A, l_stack, rhs,
         warm_starting=False,            # cold start — no reuse
         verbose=False,
         eps_abs=1e-8,
@@ -118,14 +113,14 @@ def _solve_agent_br_osqp(
     if res.info.status in ("solved", "solved_inaccurate") and res.x is not None:
         return res.x
     # OSQP failed — silently fall back to SLSQP
-    return _solve_agent_br_slsqp(ai, lin, rhs_loc, rhs_coup_i)
+    return _solve_agent_br_slsqp(ai, lin, A_stack, rhs)
 
 
 def _solve_agent_br_slsqp(
     ai,
     lin: np.ndarray,
-    rhs_loc: np.ndarray,
-    rhs_coup_i: np.ndarray,
+    A_stack: np.ndarray,
+    rhs: np.ndarray,
 ) -> np.ndarray:
     """Solve agent best-response QP via scipy SLSQP."""
     def obj(x):
@@ -134,20 +129,12 @@ def _solve_agent_br_slsqp(
     def jac(x):
         return ai.Q @ x + lin
 
-    r_loc  = rhs_loc.copy()
-    r_coup = rhs_coup_i.copy()
-    constraints = [
-        {
-            'type': 'ineq',
-            'fun':  lambda x, r=r_loc:  r - ai.A_loc @ x,
-            'jac':  lambda x:          -ai.A_loc,
-        },
-        {
-            'type': 'ineq',
-            'fun':  lambda x, r=r_coup: r - ai.C @ x,
-            'jac':  lambda x:          -ai.C,
-        },
-    ]
+    r = rhs.copy()
+    constraints = [{
+        'type': 'ineq',
+        'fun':  lambda x, r=r:  r - A_stack @ x,
+        'jac':  lambda x:          -A_stack,
+    }]
 
     res = minimize(
         obj, np.zeros(ai.n_x), jac=jac,
@@ -156,6 +143,26 @@ def _solve_agent_br_slsqp(
         options={'ftol': 1e-12, 'maxiter': 300, 'disp': False},
     )
     return res.x
+
+
+def _build_state_rhs_br(ai, p, x_list, game, i):
+    """Build RHS for state constraints on agent i given fixed U_{-i}."""
+    x_lb_rep = ai.x_lb_rep
+    x_ub_rep = ai.x_ub_rep
+    nx = game.n_p
+
+    others = [j for j in range(game.N) if j != i]
+    U_neg = np.concatenate([x_list[j] for j in others])
+
+    M_theta_i = ai.M_theta  # dimpc ordering: [Phi_x | Gamma_others]
+    # Reorder to GNE: [Gamma_others | Phi_x]
+    M_theta_gne = np.hstack([M_theta_i[:, nx:], M_theta_i[:, :nx]])
+    theta_i = np.concatenate([U_neg, p])
+    X_coupling = M_theta_gne @ theta_i
+
+    rhs_upper = x_ub_rep - X_coupling
+    rhs_lower = -x_lb_rep + X_coupling
+    return np.concatenate([rhs_upper, rhs_lower])
 
 
 def _solve_agent_br(
@@ -168,11 +175,10 @@ def _solve_agent_br(
     """
     Solve agent i's best-response QP treating x_{-i} = x_list as fixed.
 
-    min  ½ x_i^T Q_i x_i + (c_i + F_i p)^T x_i
-    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p          (local constraints)
-         C_i x_i     ≤ rhs_coup_i                    (agent-i coupling slack)
-
-    where  rhs_coup_i = d + S_coup p - Σ_{j≠i} C_j x_j
+    min  ½ x_i^T Q_i x_i + (F_cross_i U_{-i} + c_i + F_i p)^T x_i
+    s.t. A_loc_i x_i ≤ b_loc_i + S_loc_i p          (input bounds)
+         ±Γ_i x_i ≤ rhs_state_i                      (state bounds, if present)
+         C_i x_i  ≤ rhs_coup_i                       (coupling, if present)
 
     Parameters
     ----------
@@ -180,17 +186,43 @@ def _solve_agent_br(
     """
     ai = game.agents[i]
 
-    lin       = ai.c + ai.F @ p                          # (n_x_i,)
-    rhs_loc   = ai.b_loc + ai.S_loc @ p                  # (n_loc,)
-    rhs_coup_i = game.d + game.S_coup @ p                # (n_coupling,)
-    for j in range(game.N):
-        if j != i:
-            rhs_coup_i = rhs_coup_i - game.agents[j].C @ x_list[j]
+    # Linear cost term
+    if ai.F_cross is not None:
+        others = [j for j in range(game.N) if j != i]
+        U_neg = np.concatenate([x_list[j] for j in others])
+        lin = ai.c + ai.F_cross @ U_neg + ai.F @ p
+    else:
+        lin = ai.c + ai.F @ p
+
+    # Build constraint stack
+    A_parts = [ai.A_loc]
+    rhs_parts = [ai.b_loc + ai.S_loc @ p]
+
+    # State constraints
+    if ai.has_state_constraints:
+        rhs_state = _build_state_rhs_br(ai, p, x_list, game, i)
+        n_half = len(rhs_state) // 2
+        A_parts.append(ai.Gamma_self)
+        A_parts.append(-ai.Gamma_self)
+        rhs_parts.append(rhs_state[:n_half])
+        rhs_parts.append(rhs_state[n_half:])
+
+    # Coupling constraint
+    if game.n_coupling > 0 and ai.C is not None:
+        rhs_coup_i = game.d + game.S_coup @ p
+        for j in range(game.N):
+            if j != i and game.agents[j].C is not None:
+                rhs_coup_i = rhs_coup_i - game.agents[j].C @ x_list[j]
+        A_parts.append(ai.C)
+        rhs_parts.append(rhs_coup_i)
+
+    A_stack = np.vstack(A_parts)
+    rhs     = np.concatenate(rhs_parts)
 
     if qp_solver == "osqp" and _OSQP_AVAILABLE:
-        return _solve_agent_br_osqp(ai, lin, rhs_loc, rhs_coup_i)
+        return _solve_agent_br_osqp(ai, lin, A_stack, rhs)
     else:
-        return _solve_agent_br_slsqp(ai, lin, rhs_loc, rhs_coup_i)
+        return _solve_agent_br_slsqp(ai, lin, A_stack, rhs)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

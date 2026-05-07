@@ -6,8 +6,9 @@ Paper: Hall & Bemporad (2025), Algorithm 1 Steps 3-6, Eq. (1)-(4).
 For each agent i the mpQP is:
 
     min_{x_i}  1/2 x_i^T Q_i x_i  +  (c_i + F_i p)^T x_i
-    s.t.  A_loc_i x_i  <=  b_loc_i + S_loc_i p          (local)
-          C_i x_i      <=  d - C_{-i} x_{-i} + S_coup p  (coupling, rearranged)
+    s.t.  A_loc_i x_i  <=  b_loc_i + S_loc_i p          (input bounds)
+          ±Γ_i x_i     <=  ±x_{ub/lb}_rep ∓ M_θ θ_i    (state bounds)
+          C_i x_i      <=  d - C_{-i} x_{-i} + S_coup p  (coupling, if present)
           θ_i          ∈  P  (box on parameter space)
 
 Parameter vector for agent i:
@@ -23,16 +24,19 @@ Matrix derivations
 ──────────────────
 Cost:
     Q    = Q_i                                   (n_x_i, n_x_i)
-    H    = [0_{n_x_i × n_x_{-i}}  |  F_i]       (n_x_i, n_theta_i)
+    H    = [F_cross_i               |  F_i]      (n_x_i, n_theta_i)
     c    = c_i                                   (n_x_i,)
 
-Constraints  (stacked local + coupling):
-    G    = [A_loc_i ]                            (n_loc + n_coupling, n_x_i)
+Constraints  (stacked local + state + coupling):
+    G    = [A_loc_i ]                            (n_total, n_x_i)
+           [±Γ_i    ]
            [C_i     ]
-    b    = [b_loc_i ]                            (n_loc + n_coupling,)
-           [d       ]
-    F    = [0_{n_loc × n_x_{-i}}  |  S_loc_i ]  (n_loc + n_coupling, n_theta_i)
-           [-C_{-i}               |  S_coup  ]
+    b    = [b_loc_i      ]                       (n_total,)
+           [±x_{ub/lb}_rep]
+           [d            ]
+    F    = [0          |  S_loc_i ]              (n_total, n_theta_i)
+           [∓M_theta            ]
+           [-C_{-i}    |  S_coup  ]
 
 Parameter space (box):
     A_t  = [+I; -I]                             (2*n_theta_i, n_theta_i)
@@ -108,13 +112,19 @@ def build_constraint_matrices(
 
     Constraints: G x_i <= b + F @ θ_i
 
+    Includes:
+      - Local input bounds: A_loc x_i <= b_loc + S_loc p
+      - State bounds: x_lb_rep <= X <= x_ub_rep
+        → ±Gamma_i x_i <= ±x_{ub/lb}_rep ∓ M_theta θ_i
+      - Coupling constraint (if present): C_i x_i <= d - C_{-i} x_{-i} + S_coup p
+
     Returns
     -------
-    G_pp : (n_loc + n_coupling, n_x_i)
-    b_pp : (n_loc + n_coupling,)
-    F_pp : (n_loc + n_coupling, n_theta_i)
+    G_pp : (n_total, n_x_i)
+    b_pp : (n_total,)
+    F_pp : (n_total, n_theta_i)
     """
-    ai   = game.agents[i]
+    ai      = game.agents[i]
     n_x_i   = ai.n_x
     n_x_neg = game.n_x_total - n_x_i
     n_p     = game.n_p
@@ -128,25 +138,44 @@ def build_constraint_matrices(
     F_loc = np.zeros((ai.n_loc, n_theta))
     F_loc[:, n_x_neg:] = ai.S_loc                # p part
 
-    # ── coupling constraint ───────────────────────────────────────────────────
-    # sum_j C_j x_j <= d + S_coup p
-    # Rearranged for agent i:  C_i x_i <= d - C_{-i} x_{-i} + S_coup p
-    # In terms of θ_i = [x_{-i}; p]:  RHS param = [-C_{-i} | S_coup] θ_i
-    G_coup = ai.C                                 # (n_coupling, n_x_i)
-    b_coup = game.d                               # (n_coupling,)
+    # ── state constraints ─────────────────────────────────────────────────────
+    # x_lb_rep <= X <= x_ub_rep  with X = Phi_x p + Gamma_i U_i + Σ_{j≠i} Γ_j U_j
+    # Upper:  +Gamma_i U_i <= x_ub_rep - M_theta θ_i  →  F = -M_theta
+    # Lower:  -Gamma_i U_i <= -x_lb_rep + M_theta θ_i  →  F = +M_theta
+    if ai.has_state_constraints:
+        Gamma_i   = ai.Gamma_self                 # (Np*nx, n_u_i)
+        M_theta_i = ai.M_theta                    # (Np*nx, n_x_neg + n_p)
+        x_lb_rep  = ai.x_lb_rep                   # (Np*nx,)
+        x_ub_rep  = ai.x_ub_rep                   # (Np*nx,)
 
-    # Assemble C_{-i}: stack C_j column blocks for j != i in order
-    others = [game.agents[j] for j in range(game.N) if j != i]
-    C_neg = np.hstack([a.C for a in others])      # (n_coupling, n_x_neg)
+        G_state = np.vstack([Gamma_i, -Gamma_i])  # (2*Np*nx, n_u_i)
+        b_state = np.concatenate([x_ub_rep, -x_lb_rep])
+        F_state = np.vstack([-M_theta_i, M_theta_i])
+    else:
+        G_state = np.empty((0, n_x_i))
+        b_state = np.empty(0)
+        F_state = np.empty((0, n_theta))
 
-    F_coup = np.zeros((game.n_coupling, n_theta))
-    F_coup[:, :n_x_neg] = -C_neg                  # x_{-i} part: -C_{-i}
-    F_coup[:, n_x_neg:] = game.S_coup             # p part: S_coup
+    # ── coupling constraint (if present) ──────────────────────────────────────
+    if game.n_coupling > 0 and ai.C is not None:
+        G_coup = ai.C
+        b_coup = game.d
+
+        others = [game.agents[j] for j in range(game.N) if j != i]
+        C_neg = np.hstack([a.C for a in others])  # (n_coupling, n_x_neg)
+
+        F_coup = np.zeros((game.n_coupling, n_theta))
+        F_coup[:, :n_x_neg] = -C_neg              # x_{-i} part: -C_{-i}
+        F_coup[:, n_x_neg:] = game.S_coup         # p part: S_coup
+    else:
+        G_coup = np.empty((0, n_x_i))
+        b_coup = np.empty(0)
+        F_coup = np.empty((0, n_theta))
 
     # ── stack ─────────────────────────────────────────────────────────────────
-    G_pp = np.vstack([G_loc, G_coup])
-    b_pp = np.concatenate([b_loc, b_coup])
-    F_pp = np.vstack([F_loc, F_coup])
+    G_pp = np.vstack([G_loc, G_state, G_coup])
+    b_pp = np.concatenate([b_loc, b_state, b_coup])
+    F_pp = np.vstack([F_loc, F_state, F_coup])
 
     return G_pp, b_pp, F_pp
 

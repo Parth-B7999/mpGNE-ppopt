@@ -36,9 +36,8 @@ from mpgne.proj_grad_solver import pg_solve
 from mpgne.impdimc_solver import impdimc_solve
 
 # %% ── 2. Settings ────────────────────────────────────────────────────────────
-M                 = 6
+M                 = 2
 T_SIM             = 100
-L_MAX             = 2.5
 OFFLINE_BFS_MAX_M = 4
 
 # Inner QP solver for ADMM and Jacobi BR.
@@ -68,14 +67,14 @@ if __name__ == "__main__":
     print(f"[2/5] Building game formulation...")
     Q_list, R_list, P_list = default_local_weights(plant)
     game = make_gne_game_from_plant(
-        plant, L_max=L_MAX,
+        plant,
         Q_list=Q_list, R_list=R_list, P_list=P_list
     )
 
     # %% ── 3. Offline mpQP Solving ────────────────────────────────────────────
     ckpt_dir   = os.path.join(_base_path, "checkpoints_demo")
     os.makedirs(ckpt_dir, exist_ok=True)
-    base_ckpt  = os.path.join(ckpt_dir, f"agent_sols_base_M{M}_L{L_MAX}.pkl")
+    base_ckpt  = os.path.join(ckpt_dir, f"agent_sols_base_M{M}.pkl")
 
     # Solve mpQP once (shared by both neighbor methods)
     if os.path.exists(base_ckpt):
@@ -101,8 +100,8 @@ if __name__ == "__main__":
     facet_sol_dict  = {}   # "FACET-H" / "FACET-LP" -> GNESolution
 
     for label, method in NB_METHODS.items():
-        nb_ckpt     = os.path.join(ckpt_dir, f"agent_sols_{label}_M{M}_L{L_MAX}.pkl")
-        facet_ckpt  = os.path.join(ckpt_dir, f"facet_sol_{label}_M{M}_L{L_MAX}.pkl")
+        nb_ckpt     = os.path.join(ckpt_dir, f"agent_sols_{label}_M{M}.pkl")
+        facet_ckpt  = os.path.join(ckpt_dir, f"facet_sol_{label}_M{M}.pkl")
 
         if os.path.exists(nb_ckpt) and os.path.exists(facet_ckpt):
             print(f"  [{label}] Loading from checkpoint...")
@@ -218,9 +217,12 @@ if __name__ == "__main__":
         if k == 0: impd_conv_hist_k0 = res_impd.conv_hist
 
         # ── FACET-H (Hyperplane neighbors) ────────────────────────────────────
-        t0 = time.perf_counter()
+        t_start_H = time.perf_counter()
+        t_penalty_H = 0.0
         if prev_combo_H is None:
             prev_combo_H = _seed_combo(p, U_admm, agent_sols_dict["FACET-H"])
+            if k > 0: t_penalty_H += admm_times[-1]
+            
         combo_H, U_H, _ = solve_gne_online(p, prev_combo_H, agent_sols_dict["FACET-H"], game)
         if combo_H is not None:
             U_facet_H    = U_H
@@ -229,12 +231,16 @@ if __name__ == "__main__":
             U_facet_H    = U_admm.copy()
             fh_fallbacks += 1
             prev_combo_H  = None
-        fh_times.append(time.perf_counter() - t0)
+            t_penalty_H += admm_times[-1]
+        fh_times.append((time.perf_counter() - t_start_H) + t_penalty_H)
 
         # ── FACET-LP (LP facet neighbors) ─────────────────────────────────────
-        t0 = time.perf_counter()
+        t_start_LP = time.perf_counter()
+        t_penalty_LP = 0.0
         if prev_combo_LP is None:
             prev_combo_LP = _seed_combo(p, U_admm, agent_sols_dict["FACET-LP"])
+            if k > 0: t_penalty_LP += admm_times[-1]
+            
         combo_LP, U_LP, _ = solve_gne_online(p, prev_combo_LP, agent_sols_dict["FACET-LP"], game)
         if combo_LP is not None:
             U_facet_LP    = U_LP
@@ -243,7 +249,8 @@ if __name__ == "__main__":
             U_facet_LP     = U_admm.copy()
             flp_fallbacks += 1
             prev_combo_LP  = None
-        flp_times.append(time.perf_counter() - t0)
+            t_penalty_LP += admm_times[-1]
+        flp_times.append((time.perf_counter() - t_start_LP) + t_penalty_LP)
 
         error_gaps.append(np.linalg.norm(U_facet_H - U_admm))
 
@@ -396,7 +403,7 @@ if __name__ == "__main__":
     _style(ax_s, "FACET-H Speedup vs Other Methods", "Comparison", "Speedup (×)")
 
     fig2.suptitle(
-        f"Benchmark: FACET-H vs FACET-LP vs Iterative Solvers  (M={M}, L_max={L_MAX})",
+        f"Benchmark: FACET-H vs FACET-LP vs Iterative Solvers  (M={M})",
         color='white', fontsize=13, fontweight='bold', y=1.01)
     p2 = os.path.join(os.path.dirname(__file__), "demo_benchmark.png")
     fig2.savefig(p2, dpi=200, bbox_inches='tight', facecolor=fig2.get_facecolor())

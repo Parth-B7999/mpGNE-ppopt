@@ -10,13 +10,13 @@
 - **FACET-GNE Solvers**: Explicit solvers using precomputed critical regions for ultra-fast online inference (< 1ms). Supports two neighbor-discovery strategies:
   - **FACET-H (Hyperplane Adjacency)**: Fast offline discovery based on shared hyperplanes.
   - **FACET-LP (Facet Adjacency)**: Exact (d-1)-dimensional facet discovery using LP (per ACC 2026).
-- **ImpGNE Solver**: An iterative multiparametric Distributed MPC (DiMPC) solver that leverages precomputed explicit solution maps to perform affine lookups instead of solving QPs during iterations.
+- **ImpGNE Solver**: An iterative multiparametric Distributed GNE solver that leverages precomputed explicit solution maps to perform affine lookups instead of solving QPs during iterations.
 - **High-Performance Iterative Baselines**: Integrated **OSQP**-based ADMM and Jacobi Best-Response (Projected Gradient) solvers for robust benchmarking. Supports fallback to SLSQP.
 - **Multi-Agent Scaling**: Scalable implementation for $M \ge 4$ agents with support for coupling constraints and parallelized offline map generation.
 
 ## Performance Benchmark
 
-In a typical 4-agent DiMPC scenario with coupling constraints and `osqp` backend:
+In a typical 4-agent GNE scenario with coupling constraints and `osqp` backend:
 
 | Method | Avg Time | Max Time | Avg Iters | Fallbacks |
 | :--- | :--- | :--- | :--- | :--- |

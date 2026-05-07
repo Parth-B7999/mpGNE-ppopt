@@ -1,9 +1,9 @@
 """
-impdimc_solver.py — ImpGNE: Iterative multiparametric Distributed MPC.
+impdimc_solver.py — ImpGNE: Iterative multiparametric GNE solver.
 
-Implements the core iteration loop of Algorithm 1 from Saini et al. (2025),
-WITHOUT Wegstein acceleration — plain Jacobi substitution using the
-precomputed explicit mpQP solution maps.
+Plain Jacobi substitution using precomputed explicit mpQP solution maps.
+No fallback needed — the mpQP solution partitions the entire parameter box
+bounded by state and input limits, so θ_i = [U_{-i}; p] is always covered.
 
 Key Distinction from Jacobi BR (proj_grad_solver.py)
 ─────────────────────────────────────────────────────
@@ -26,7 +26,7 @@ Given current state x(k) = p and precomputed agent_sols:
 
     For each agent i (simultaneously):
       1. Build parametric vector:
-            θ_i = [ p;  U_{-i} ]
+            θ_i = [U_{-i}; p]
          where U_{-i} = all OTHER agents' blocks from U_bar.
 
       2. Locate the active critical region CR_i in agent_sols[i]
@@ -34,8 +34,6 @@ Given current state x(k) = p and precomputed agent_sols:
 
       3. Evaluate explicit best-response (affine map):
             U_i_new = A_cr · θ_i + b_cr
-
-         If θ_i falls outside all known CRs → ADMM fallback for this agent.
 
     U_bar_new = concat(U_i_new for i in 0..M-1)
 
@@ -76,14 +74,12 @@ class IMPDiMPCResult:
     n_iter     : int             outer iterations performed
     converged  : bool            True if δ < tol before max_iter
     conv_hist  : list[float]     ‖U_bar^{p+1} − U_bar^p‖ per iteration
-    n_fallback : int             number of agent-steps that used ADMM fallback
     solve_time : float           wall-clock seconds
     """
     x_sol:      list[np.ndarray]
     n_iter:     int
     converged:  bool
     conv_hist:  list[float] = field(default_factory=list)
-    n_fallback: int = 0
     solve_time: float = 0.0
 
     @property
@@ -96,23 +92,24 @@ class IMPDiMPCResult:
 #  Critical-region lookup (one agent)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _locate_cr(agent_sol, theta: np.ndarray) -> int | None:
+def _locate_cr(agent_sol, theta: np.ndarray, tol: float = 1e-6) -> int:
     """
-    Find the index of the first critical region in agent_sol whose
-    polyhedron contains theta  (E · theta <= f, all rows).
+    Find the index of the critical region containing theta.
 
-    Returns None if no region is feasible.
+    The mpQP solution partitions the entire parameter box, so theta is
+    always inside some region (up to floating-point tolerance). Returns
+    the nearest region if no exact match — the affine law is continuous
+    across region boundaries so the nearest region gives the correct answer.
     """
-    best_idx = None
+    best_idx = 0
     best_viol = np.inf
     for idx, cr in enumerate(agent_sol.regions):
         viol = float(np.max(cr.E @ theta - cr.f))
-        if viol <= 0.0:
-            return idx                  # exact membership → return immediately
-        if viol < best_viol:            # track nearest region for fallback
+        if viol <= tol:
+            return idx
+        if viol < best_viol:
             best_viol, best_idx = viol, idx
-    # If nothing is exactly feasible, return None (caller handles fallback)
-    return None
+    return best_idx
 
 
 def _evaluate_cr(cr, theta: np.ndarray) -> np.ndarray:
@@ -121,53 +118,6 @@ def _evaluate_cr(cr, theta: np.ndarray) -> np.ndarray:
         U* = A_cr · theta + b_cr
     """
     return cr.A @ theta + cr.b
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  ADMM fallback (one agent, cheap single-agent QP via scipy)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _admm_fallback_agent(
-    game: GNEGame,
-    i: int,
-    p: np.ndarray,
-    U_bar: np.ndarray,
-    n_x_list: list[int],
-) -> np.ndarray:
-    """
-    Solve agent i's best-response QP via scipy SLSQP when the explicit map
-    does not cover the current operating point (fallback only).
-
-    Coupling RHS = d + S_coup p - Σ_{j≠i} C_j U_j
-    """
-    from scipy.optimize import minimize
-    ai = game.agents[i]
-
-    lin      = ai.c + ai.F @ p
-    rhs_loc  = ai.b_loc + ai.S_loc @ p
-    rhs_coup = game.d + game.S_coup @ p
-
-    off = 0
-    for j, nx_j in enumerate(n_x_list):
-        if j != i:
-            rhs_coup = rhs_coup - ai.C @ U_bar[off:off+nx_j] \
-                if False else rhs_coup - game.agents[j].C @ U_bar[off:off+nx_j]
-        off += nx_j
-
-    def obj(x): return 0.5 * x @ ai.Q @ x + lin @ x
-    def jac(x): return ai.Q @ x + lin
-
-    r_loc, r_coup = rhs_loc.copy(), rhs_coup.copy()
-    constraints = [
-        {'type': 'ineq', 'fun': lambda x, r=r_loc:  r - ai.A_loc @ x,
-                          'jac': lambda x:           -ai.A_loc},
-        {'type': 'ineq', 'fun': lambda x, r=r_coup: r - ai.C @ x,
-                          'jac': lambda x:           -ai.C},
-    ]
-    res = minimize(obj, np.zeros(ai.n_x), jac=jac, method='SLSQP',
-                   constraints=constraints,
-                   options={'ftol': 1e-10, 'maxiter': 300, 'disp': False})
-    return res.x
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,7 +167,6 @@ def impdimc_solve(
     conv_hist:  list[float] = []
     converged  = False
     delta      = np.inf
-    n_fallback = 0
 
     t0 = time.perf_counter()
 
@@ -226,23 +175,16 @@ def impdimc_solve(
         U_new_parts = []
 
         for i in range(N):
-            # ── Build θ_i = [p;  U_{-i}] ─────────────────────────────────────
+            # ── Build θ_i = [U_{-i}; p] ──────────────────────────────────────
             U_neg_i_parts = [
                 U_bar[offsets[j]:offsets[j+1]]
                 for j in range(N) if j != i
             ]
             theta_i = np.concatenate([p] + U_neg_i_parts)   # (n_p + Σ_{j≠i} n_x_j,)
 
-            # ── Locate critical region ────────────────────────────────────────
+            # ── Locate and evaluate — mpQP covers entire parameter box ───────
             cr_idx = _locate_cr(agent_sols[i], theta_i)
-
-            if cr_idx is not None:
-                # Explicit affine evaluation — sub-ms
-                U_i_new = _evaluate_cr(agent_sols[i].regions[cr_idx], theta_i)
-            else:
-                # Fallback: solve QP for this agent
-                U_i_new = _admm_fallback_agent(game, i, p, U_bar, n_x_list)
-                n_fallback += 1
+            U_i_new = _evaluate_cr(agent_sols[i].regions[cr_idx], theta_i)
 
             U_new_parts.append(U_i_new)
 
@@ -253,8 +195,7 @@ def impdimc_solve(
         conv_hist.append(delta)
 
         if verbose and (it % 20 == 0 or it == max_iter - 1):
-            print(f"  [ImpGNE] iter {it:4d}  δ={delta:.2e}"
-                  f"  fb={n_fallback}")
+            print(f"  [ImpGNE] iter {it:4d}  δ={delta:.2e}")
 
         U_bar = U_bar_new
 
@@ -270,6 +211,5 @@ def impdimc_solve(
         n_iter=it + 1,
         converged=converged,
         conv_hist=conv_hist,
-        n_fallback=n_fallback,
         solve_time=time.perf_counter() - t0,
     )

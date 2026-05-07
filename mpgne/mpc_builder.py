@@ -8,20 +8,24 @@ Key difference from cooperative dimpc
 ──────────────────────────────────────
 dimpc:  agents share a weighted GLOBAL cost (rho_i * sum of all states/inputs)
 GNE:    each agent minimises ONLY its LOCAL cost (own states/inputs)
-        + they share a COUPLING CONSTRAINT on aggregate input
+        + state bound constraints couple agents through the dynamics
 
 Problem formulation
 ───────────────────
-Agent i solves (game-theoretic MPC, Hall & Bemporad Eq. 18):
+Agent i solves (generalized Nash game-theoretic MPC):
 
     min_{U_i}  ½ Σ_{k=0}^{Np-1} [ x_k^T Q_i_diag x_k + u_{i,k}^T R_i u_{i,k} ]
 
     s.t.  x_{k+1} = A x_k + Σ_j B_j u_{j,k}      (coupled dynamics)
           u_lb_i ≤ u_{i,k} ≤ u_ub_i               (local input bounds)
-          Σ_j u_{j,k} ≤ L_max   for each k=0..Np-1 (shared coupling)
+          x_lb ≤ x_k ≤ x_ub   for each k=1..Np    (state bounds, couple agents)
           x_0 = p                                   (initial state is parameter)
 
 where Q_i_diag = blkdiag(0,..., Q_i, ..., 0) — only agent i's state block.
+
+State constraints x_lb ≤ X ≤ x_ub create the "generalized" Nash structure:
+each agent's feasible set depends on other agents' decisions through the
+predicted state trajectory X = Φ_x p + Σ_j Γ_j U_j.
 
 Expanding over the horizon using prediction matrices (Φ_x, Γ_j):
     X = Φ_x p + Γ_i U_i + Σ_{j≠i} Γ_j U_j
@@ -34,7 +38,7 @@ Collecting U_i terms (treating p = x_0 and U_{-i} as parameters θ_i = [U_{-i}; 
 
 Constraints in θ_i = [U_{-i}; p] form:
     Input bounds:  [I; -I] U_i  ≤  [u_ub_rep; -u_lb_rep]   (no θ_i dependence)
-    Coupling:      C_i U_i      ≤  L_max*1 - C_{-i} U_{-i}  (θ_i dependence via U_{-i})
+    State bounds:  ±Γ_i U_i     ≤  ±(x_{ub/lb}_rep) ∓ M_θ θ_i  (θ_i dependence)
 
 Parameter:  p = x_0 ∈ [x_lb_global, x_ub_global]
 """
@@ -144,35 +148,34 @@ def default_local_weights(
 
 def make_gne_game_from_plant(
     plant: Plant,
-    L_max: float = 5.0,
     Q_list: list[np.ndarray] | None = None,
     R_list: list[np.ndarray] | None = None,
     P_list: list[np.ndarray] | None = None,
 ) -> GNEGame:
     """
-    Convert a dimpc Plant into a GNEGame for game-theoretic MPC.
+    Convert a dimpc Plant into a GNEGame for generalized-Nash game-theoretic MPC.
 
     Each agent i is a non-cooperative controller minimising only its own
     local MPC cost over the prediction horizon Np, subject to input bounds
-    and a shared aggregate-input coupling constraint.
+    and state bounds (which couple the agents through the dynamics).
 
     Parameter vector: p = x_0 ∈ R^{nx_total}  (current global state)
 
-    Coupling constraint: Σ_j u_{j,k} ≤ L_max  for each k = 0..Np-1
-    Written in stacked form as:  Σ_j C_j U_j ≤ L_max * 1_{Np}
-    where C_j = I_{Np} ⊗ ones(1, nu_j)  (shape: Np × Np*nu_j)
+    State constraints:  x_lb ≤ x_k ≤ x_ub  for each k = 1..Np
+    These replace the L_max coupling constraint — the game is "generalized"
+    because each agent's feasible region depends on other agents' decisions
+    through the predicted state trajectory.
 
     Parameters
     ----------
     plant  : Plant  (from mpgne.plant_gen or dimpc plant_gen)
-    L_max  : aggregate-input coupling limit per time step
     Q_list : local state cost matrices per agent  (default: identity)
     R_list : local input cost matrices per agent  (default: identity)
     P_list : terminal cost matrices per agent     (default: DARE solution)
 
     Returns
     -------
-    GNEGame  with N = plant.M agents,  n_p = plant.nx,  n_coupling = plant.Np
+    GNEGame  with N = plant.M agents,  n_p = plant.nx,  n_coupling = 0
     """
     M  = plant.M
     Np = plant.Np
@@ -184,6 +187,12 @@ def make_gne_game_from_plant(
     # ── prediction matrices ───────────────────────────────────────────────────
     B_list = [plant.B_j(j) for j in range(M)]
     Phi_x, Gamma_list = build_prediction_matrices(plant.A, B_list, Np)
+
+    # ── global state bounds (tiled over horizon) ──────────────────────────────
+    x_lb_global = np.concatenate([s.x_lb for s in plant.subsystems])  # (nx,)
+    x_ub_global = np.concatenate([s.x_ub for s in plant.subsystems])
+    x_lb_rep_global = np.tile(x_lb_global, Np)   # (Np*nx,)
+    x_ub_rep_global = np.tile(x_ub_global, Np)
 
     agents = []
     for i in range(M):
@@ -219,10 +228,16 @@ def make_gne_game_from_plant(
         b_loc = np.concatenate([u_ub_rep, -u_lb_rep])         # (2*n_u_i,)
         S_loc = np.zeros((2 * n_u_i, nx))                     # no p-dependence
 
-        # ── coupling block: C_i = I_Np ⊗ ones(1, nu_i) ───────────────────────
-        # C_i U_i = [u_i(0) * ones; u_i(1) * ones; ...] summed → aggregate
-        # For nu_i = 1: C_i = I_Np  (each row picks one input)
-        C_i = np.kron(np.eye(Np), np.ones((1, nu_i)))         # (Np, Np*nu_i)
+        # ── state constraint data (for mp_solver to build G/F matrices) ─────
+        # State constraints:  x_lb_rep ≤ X ≤ x_ub_rep
+        #   X = Phi_x p + Gamma_i U_i + Σ_{j≠i} Gamma_j U_j
+        # Rearranged for agent i's constraints in θ_i = [U_{-i}; p]:
+        #   ±Gamma_i U_i ≤ ±x_{ub/lb}_rep ∓ M_theta θ_i
+        # where M_theta = [Phi_x | Gamma_{j1} | ...]
+        Gamma_self = Gamma_i.copy()
+        M_theta_i  = M_theta_dimpc.copy()  # (Np*nx, nx + n_u_neg)
+        x_lb_rep_i = x_lb_rep_global.copy()
+        x_ub_rep_i = x_ub_rep_global.copy()
 
         agents.append(Agent(
             index=i,
@@ -231,25 +246,21 @@ def make_gne_game_from_plant(
             c=np.zeros(n_u_i),
             F=F_i,
             F_cross=F_cross_i,
-            C=C_i,
             A_loc=A_loc,
             b_loc=b_loc,
             S_loc=S_loc,
+            Gamma_self=Gamma_self,
+            M_theta=M_theta_i,
+            x_lb_rep=x_lb_rep_i,
+            x_ub_rep=x_ub_rep_i,
         ))
 
-    # ── shared coupling constraint ────────────────────────────────────────────
-    # Σ_j C_j U_j ≤ L_max * 1_{Np}
-    d      = L_max * np.ones(Np)          # (Np,)
-    S_coup = np.zeros((Np, nx))           # coupling RHS doesn't depend on x_0
-
     # ── parameter space: p = x_0 ∈ [x_lb_global, x_ub_global] ───────────────
-    p_lb = np.concatenate([s.x_lb for s in plant.subsystems])
-    p_ub = np.concatenate([s.x_ub for s in plant.subsystems])
+    p_lb = x_lb_global.copy()
+    p_ub = x_ub_global.copy()
 
     return GNEGame(
         agents=agents,
-        d=d,
-        S_coup=S_coup,
         p_lb=p_lb,
         p_ub=p_ub,
     )

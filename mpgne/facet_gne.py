@@ -152,8 +152,48 @@ def _facet_lp_test(
     return res.success and (-res.fun) > tol
 
 
+def _facet_lp_refine_worker(in_q, out_q):
+    """Parallel worker: LP-refine hyperplane-based candidate neighbors.
+
+    Receives *only* the candidate pairs that already passed the hyperplane
+    pre-filter (Phase 1).  Re-finds which shared hyperplane they match on
+    and runs the rigorous LP test to confirm true (d-1)-dimensional adjacency.
+    """
+    while True:
+        task = in_q.get()
+        if task is None:
+            break
+        agent_idx, cr_idx, cr_i_E, cr_i_f, candidate_data = task
+        # candidate_data: list of (k_idx, cr_k_E, cr_k_f) — hyperplane neighbors only
+        refined = []
+        for k, cr_k_E, cr_k_f in candidate_data:
+            # Re-find which hyperplane they share (cheap, we need shared_j for LP)
+            shared_j = None
+            for j in range(len(cr_i_f)):
+                e_ij   = cr_i_E[j]
+                f_ij   = cr_i_f[j]
+                e_norm = e_ij / (np.linalg.norm(e_ij) + 1e-14)
+                f_s    = f_ij / (np.linalg.norm(e_ij) + 1e-14)
+                for l in range(len(cr_k_f)):
+                    ek  = cr_k_E[l]
+                    nrm = np.linalg.norm(ek) + 1e-14
+                    if (np.linalg.norm(e_norm + ek / nrm) < 1e-6 and
+                            abs(f_s + cr_k_f[l] / nrm) < 1e-6):
+                        shared_j = j
+                        break
+                if shared_j is not None:
+                    break
+
+            if shared_j is not None and _facet_lp_test(cr_i_E, cr_i_f, cr_k_E, cr_k_f, shared_j):
+                refined.append(k)
+
+        out_q.put((agent_idx, cr_idx, refined))
+
+
 def _facet_adjacency_worker(in_q, out_q):
-    """Parallel worker: facet-adjacency LP test for one CR against all others."""
+    """Parallel worker: facet-adjacency LP test for one CR against all others.
+    (Legacy — kept for direct use; two-phase path via _facet_lp_refine_worker is
+    preferred when hyperplane results are already available.)"""
     while True:
         task = in_q.get()
         if task is None:
@@ -193,6 +233,46 @@ def _facet_adjacency_worker(in_q, out_q):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Shared multiprocessing pool helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_worker_pool(agent_solutions, worker_fn, task_builder):
+    """Generic multiprocessing pool: queue tasks, collect results, update CRs.
+
+    task_builder(agent_idx, cr_idx, cr, agent_solutions[a_idx]) -> tuple
+        Returns the task tuple to put on the input queue for this CR.
+    """
+    t0 = time.perf_counter()
+    in_q  = multiprocessing.Queue()
+    out_q = multiprocessing.Queue()
+    num_workers = multiprocessing.cpu_count()
+    workers = [
+        multiprocessing.Process(target=worker_fn, args=(in_q, out_q))
+        for _ in range(num_workers)
+    ]
+    for w in workers:
+        w.start()
+
+    total_tasks = 0
+    for a_idx, s in enumerate(agent_solutions):
+        for cr_idx, cr in enumerate(s.regions):
+            task = task_builder(a_idx, cr_idx, cr, s)
+            in_q.put(task)
+            total_tasks += 1
+
+    for _ in range(total_tasks):
+        a_idx, cr_idx, neighbors = out_q.get()
+        agent_solutions[a_idx].regions[cr_idx].facet_neighbors = neighbors
+
+    for _ in range(num_workers):
+        in_q.put(None)
+    for w in workers:
+        w.join()
+
+    return total_tasks, time.perf_counter() - t0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Unified public API
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -216,9 +296,9 @@ def find_all_agent_cr_neighbors(
             slightly more online hops.
 
         "facet_adjacency"  (rigorous, compact — ACC 2026 paper)
-            Confirms shared boundary is truly (d-1)-dimensional via an LP.
-            Produces smaller, exact neighbor sets; slower offline but
-            maximally efficient online search.
+            Two-phase: (1) hyperplane pre-filter to find candidate pairs,
+            then (2) LP refinement on candidates only.  Produces exact,
+            compact neighbor sets.
 
     verbose : print timing summary
 
@@ -226,53 +306,131 @@ def find_all_agent_cr_neighbors(
     -------
     agent_solutions  (modified in-place, facet_neighbors populated)
     """
-    # Select worker
     if method in ("facet_adjacency", "facet"):
-        worker_fn = _facet_adjacency_worker
-        method_label = "Facet Adjacency (LP, ACC 2026)"
-    else:   # default: hyperplane_adjacency
-        worker_fn = _hyperplane_adjacency_worker
-        method_label = "Hyperplane Adjacency (fast)"
-
-    if verbose:
-        print(f"[find_neighbors] method={method_label}")
-
-    t0 = time.perf_counter()
-    in_q  = multiprocessing.Queue()
-    out_q = multiprocessing.Queue()
-    num_workers = multiprocessing.cpu_count()
-    workers = [
-        multiprocessing.Process(target=worker_fn, args=(in_q, out_q))
-        for _ in range(num_workers)
-    ]
-    for w in workers:
-        w.start()
-
-    total_tasks = 0
-    for a_idx, s in enumerate(agent_solutions):
-        other_crs_data = [(cr.E, cr.f) for cr in s.regions]
-        for cr_idx, cr in enumerate(s.regions):
-            in_q.put((a_idx, cr_idx, cr.E, cr.f, other_crs_data))
-            total_tasks += 1
-
-    for _ in range(total_tasks):
-        a_idx, cr_idx, neighbors = out_q.get()
-        agent_solutions[a_idx].regions[cr_idx].facet_neighbors = neighbors
-
-    for _ in range(num_workers):
-        in_q.put(None)
-    for w in workers:
-        w.join()
-
-    if verbose:
-        total_nb = sum(
-            len(cr.facet_neighbors)
-            for s in agent_solutions for cr in s.regions
+        # ── Phase 1: Hyperplane adjacency (fast pre-filter) ──────────────────
+        if verbose:
+            print("[find_neighbors] Phase 1/2: Hyperplane pre-filter...")
+        _run_worker_pool(
+            agent_solutions, _hyperplane_adjacency_worker,
+            task_builder=lambda a_idx, cr_idx, cr, s: (
+                a_idx, cr_idx, cr.E, cr.f,
+                [(c.E, c.f) for c in s.regions]
+            ),
         )
-        print(f"[find_neighbors] Done in {time.perf_counter()-t0:.2f}s "
-              f"| total neighbor pairs: {total_nb}")
+        # Save hyperplane-based candidates before LP overwrites them
+        hp_neighbors = {}
+        n_hp = 0
+        for a_idx, s in enumerate(agent_solutions):
+            for cr_idx, cr in enumerate(s.regions):
+                hp_neighbors[(a_idx, cr_idx)] = list(cr.facet_neighbors)
+                n_hp += len(cr.facet_neighbors)
+
+        if verbose:
+            print(f"[find_neighbors] Phase 1 done — {n_hp} candidate pairs")
+
+        # ── Phase 2: LP refinement on candidates only ────────────────────────
+        if verbose:
+            print(f"[find_neighbors] Phase 2/2: LP refinement ({n_hp} LPs)...")
+        t2 = time.perf_counter()
+        # Build per-agent fast lookup: cr_idx → (E, f)
+        cr_lookup = {}
+        for a_idx, s in enumerate(agent_solutions):
+            cr_lookup[a_idx] = {k: (cr.E, cr.f) for k, cr in enumerate(s.regions)}
+
+        n_tasks, _ = _run_worker_pool(
+            agent_solutions, _facet_lp_refine_worker,
+            task_builder=lambda a_idx, cr_idx, cr, s: (
+                a_idx, cr_idx, cr.E, cr.f,
+                [(k, cr_lookup[a_idx][k][0], cr_lookup[a_idx][k][1])
+                 for k in hp_neighbors.get((a_idx, cr_idx), [])]
+            ),
+        )
+        elapsed_2 = time.perf_counter() - t2
+
+        if verbose:
+            n_refined = sum(len(cr.facet_neighbors)
+                           for s in agent_solutions for cr in s.regions)
+            print(f"[find_neighbors] Phase 2 done in {elapsed_2:.1f}s "
+                  f"| {n_refined} facet neighbors "
+                  f"(filtered {n_hp - n_refined} false positives)")
+
+    else:   # default: hyperplane_adjacency
+        if verbose:
+            print("[find_neighbors] method=Hyperplane Adjacency (fast)")
+        _run_worker_pool(
+            agent_solutions, _hyperplane_adjacency_worker,
+            task_builder=lambda a_idx, cr_idx, cr, s: (
+                a_idx, cr_idx, cr.E, cr.f,
+                [(c.E, c.f) for c in s.regions]
+            ),
+        )
+        if verbose:
+            total_nb = sum(len(cr.facet_neighbors)
+                           for s in agent_solutions for cr in s.regions)
+            print(f"[find_neighbors] Done | total neighbor pairs: {total_nb}")
 
     return agent_solutions
+
+
+def refine_neighbors_with_lp(
+    agent_solutions: list[AgentSolution],
+    verbose: bool = True,
+) -> list[AgentSolution]:
+    """
+    Refine existing hyperplane-based facet_neighbors via rigorous LP test.
+
+    Takes agent solutions whose facet_neighbors are already populated by
+    hyperplane adjacency and replaces them with LP-verified facet neighbors.
+    This avoids re-running the O(n_cr²) hyperplane scan — use when FACET-H
+    results are already available.
+
+    Parameters
+    ----------
+    agent_solutions : list of AgentSolution with facet_neighbors populated
+    verbose         : print timing
+
+    Returns
+    -------
+    agent_solutions  (modified in-place)
+    """
+    # Snapshot hyperplane-based candidates
+    hp_neighbors = {}
+    n_hp = 0
+    for a_idx, s in enumerate(agent_solutions):
+        for cr_idx, cr in enumerate(s.regions):
+            hp_neighbors[(a_idx, cr_idx)] = list(cr.facet_neighbors)
+            n_hp += len(cr.facet_neighbors)
+
+    if verbose:
+        print(f"[lp_refine] Refining {n_hp} hyperplane candidates via LP...")
+
+    t0 = time.perf_counter()
+
+    # Build per-agent fast lookup: cr_idx → (E, f)
+    cr_lookup = {}
+    for a_idx, s in enumerate(agent_solutions):
+        cr_lookup[a_idx] = {k: (cr.E, cr.f) for k, cr in enumerate(s.regions)}
+
+    _run_worker_pool(
+        agent_solutions, _facet_lp_refine_worker,
+        task_builder=lambda a_idx, cr_idx, cr, s: (
+            a_idx, cr_idx, cr.E, cr.f,
+            [(k, cr_lookup[a_idx][k][0], cr_lookup[a_idx][k][1])
+             for k in hp_neighbors.get((a_idx, cr_idx), [])]
+        ),
+    )
+
+    elapsed = time.perf_counter() - t0
+    n_refined = sum(len(cr.facet_neighbors)
+                    for s in agent_solutions for cr in s.regions)
+
+    if verbose:
+        print(f"[lp_refine] Done in {elapsed:.1f}s "
+              f"| {n_refined} facet neighbors "
+              f"(filtered {n_hp - n_refined} false positives)")
+
+    return agent_solutions
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Part 2 — Parallel Seed Finding & Sequential BFS
@@ -296,36 +454,40 @@ def _process_combo_kernel(combo, agent_sols, game, tol_rank, tol_nonempty, D_box
     n_p = D_full.shape[1]; nrms = np.linalg.norm(D_full, axis=1, keepdims=True)
     A_lp = np.hstack([D_full, nrms]); b_lp = e_full
     c_lp = np.zeros(n_p + 1); c_lp[-1] = -1.0
-    
-    # Use 'highs' for better performance
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         res = linprog(c_lp, A_ub=A_lp, b_ub=b_lp, bounds=[(None, None)]*(n_p+1), method='highs')
-        
     if res.success and res.x[-1] > -tol_nonempty:
         return GNECriticalRegion(combination=tuple(combo), D=D_full, e=e_full, H_x=eq.H_x, h_x=eq.h_x, Mx=Mx, Mp=Mp, M1=M1, is_unique=eq.is_unique)
     return None
 
 def solve_gne_online(p: np.ndarray, prev_combo: tuple | None, agent_sols: list[AgentSolution], game: GNEGame, tol_rank: float = 1e-8):
     """
-    Online search for GNE combination. Checks restricted sets if prev_combo is given,
-    then falls back to full search.
+    Online search for GNE combination via 1-hop neighbor walk.
+
+    If prev_combo is given, checks:
+      1. The current combo (same as previous step)
+      2. All combos where exactly ONE agent moves to a neighbor CR
+    This keeps the per-step search O(sum of neighbor counts) — sub-millisecond.
+
+    Falls back to ADMM (via returning None) if the 1-hop neighborhood is exhausted.
+    Falls back to full exhaustive search if prev_combo is None (cold-start).
     Returns (combo, u_star, combos_checked).
     """
     import itertools
     M = game.N
     combos_checked = 0
-    
-    # 1. Restricted Search (Hop-based to avoid explosion)
+
     if prev_combo is not None:
         warm_tup = tuple(prev_combo)
-        
+
         def local_search():
+            # 0-hop: same combo as previous step
             yield warm_tup
-            # 1-hop (change one agent)
+            # 1-hop: exactly one agent moves to a neighbor CR
             for i in range(M):
-                v_warm = warm_tup[i]
-                for nbr in agent_sols[i].regions[v_warm].facet_neighbors:
+                v_i = warm_tup[i]
+                for nbr in agent_sols[i].regions[v_i].facet_neighbors:
                     nxt = list(warm_tup)
                     nxt[i] = nbr
                     yield tuple(nxt)
@@ -334,32 +496,28 @@ def solve_gne_online(p: np.ndarray, prev_combo: tuple | None, agent_sols: list[A
             combos_checked += 1
             Mx, Mp, M1 = _assemble_equilibrium_system(combo, agent_sols, game)
             eq = _solve_equilibrium(Mx, Mp, M1, tol_rank=tol_rank)
-            if not eq.solvable: continue
-            
+            if not eq.solvable:
+                continue
             D_crs, e_crs = _project_crs_to_p_space(combo, agent_sols, game, eq.H_x, eq.h_x)
             if np.all(D_crs @ p <= e_crs + 1e-6):
                 u_star = eq.H_x @ p + eq.h_x
                 return combo, u_star, combos_checked
-                
-        # If not found within 2 hops, return None immediately to use ADMM 
-        # (Full search is too slow for online GNE)
+
+        # 1-hop exhausted → ADMM fallback
         return None, None, combos_checked
-                
-    # 2. Full Search
-    search_sets = [range(s.n_cr) for s in agent_sols]
-    search_iter = itertools.product(*search_sets)
-    
-    for combo in search_iter:
+
+    # Full exhaustive search (cold-start only, prev_combo is None)
+    for combo in itertools.product(*[range(s.n_cr) for s in agent_sols]):
         combos_checked += 1
         Mx, Mp, M1 = _assemble_equilibrium_system(combo, agent_sols, game)
         eq = _solve_equilibrium(Mx, Mp, M1, tol_rank=tol_rank)
-        if not eq.solvable: continue
-        
+        if not eq.solvable:
+            continue
         D_crs, e_crs = _project_crs_to_p_space(combo, agent_sols, game, eq.H_x, eq.h_x)
         if np.all(D_crs @ p <= e_crs + 1e-6):
             u_star = eq.H_x @ p + eq.h_x
             return combo, u_star, combos_checked
-            
+
     return None, None, combos_checked
 
 def _seed_worker(in_q, out_q, agent_sols, game, tol_rank, tol_nonempty, D_box, e_box):
