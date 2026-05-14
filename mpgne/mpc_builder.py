@@ -148,35 +148,44 @@ def default_local_weights(
 
 def make_gne_game_from_plant(
     plant: Plant,
+    coupling_mode: str = "state_bounds",
+    L_max: float = 5.0,
     Q_list: list[np.ndarray] | None = None,
     R_list: list[np.ndarray] | None = None,
     P_list: list[np.ndarray] | None = None,
 ) -> GNEGame:
     """
-    Convert a dimpc Plant into a GNEGame for generalized-Nash game-theoretic MPC.
+    Convert a dimpc Plant into a GNEGame for game-theoretic MPC.
 
-    Each agent i is a non-cooperative controller minimising only its own
-    local MPC cost over the prediction horizon Np, subject to input bounds
-    and state bounds (which couple the agents through the dynamics).
+    Two coupling formulations are supported via ``coupling_mode``:
 
-    Parameter vector: p = x_0 ∈ R^{nx_total}  (current global state)
+    ``"state_bounds"`` (default — generalized Nash):
+        State constraints  x_lb ≤ x_k ≤ x_ub  for k=1..Np couple agents
+        through the predicted trajectory.  Each agent's feasible set depends
+        on other agents' decisions via  X = Φ_x p + Σ_j Γ_j U_j.
+        Encoded as Gamma_self / M_theta / x_lb_rep / x_ub_rep on each Agent.
+        GNEGame has n_coupling = 0  (no global coupling constraint).
 
-    State constraints:  x_lb ≤ x_k ≤ x_ub  for each k = 1..Np
-    These replace the L_max coupling constraint — the game is "generalized"
-    because each agent's feasible region depends on other agents' decisions
-    through the predicted state trajectory.
+    ``"l_max"`` (aggregate-input coupling):
+        Shared constraint  Σ_j u_{j,k} ≤ L_max  for k=0..Np-1.
+        Encoded as C_i on each Agent and d / S_coup on GNEGame.
+        GNEGame has n_coupling = Np.
 
     Parameters
     ----------
-    plant  : Plant  (from mpgne.plant_gen or dimpc plant_gen)
-    Q_list : local state cost matrices per agent  (default: identity)
-    R_list : local input cost matrices per agent  (default: identity)
-    P_list : terminal cost matrices per agent     (default: DARE solution)
+    plant         : Plant  (from mpgne.plant_gen or dimpc plant_gen)
+    coupling_mode : ``"state_bounds"`` | ``"l_max"``
+    L_max         : aggregate-input limit per step (only used when coupling_mode="l_max")
+    Q_list        : local state cost matrices per agent  (default: identity)
+    R_list        : local input cost matrices per agent  (default: identity)
+    P_list        : terminal cost matrices per agent     (default: DARE solution)
 
     Returns
     -------
-    GNEGame  with N = plant.M agents,  n_p = plant.nx,  n_coupling = 0
+    GNEGame  with N = plant.M agents,  n_p = plant.nx
     """
+    if coupling_mode not in ("state_bounds", "l_max"):
+        raise ValueError(f"coupling_mode must be 'state_bounds' or 'l_max', got {coupling_mode!r}")
     M  = plant.M
     Np = plant.Np
     nx = plant.nx
@@ -213,11 +222,10 @@ def make_gne_game_from_plant(
         H_qp_i = Gamma_i.T @ Q_full_i @ Gamma_i + R_bar_i  # (n_u_i, n_u_i)
 
         # ── parametric cost (dimpc ordering: [Phi_x | Gamma_others]) ─────────
-        # H_par_full = Gamma_i^T Q_full_i [Phi_x | Gamma_{j1} | ...]
         M_theta_dimpc = np.hstack([Phi_x] + Gamma_others)   # (Np*nx, nx + n_u_neg)
         H_par_full    = Gamma_i.T @ Q_full_i @ M_theta_dimpc # (n_u_i, nx + n_u_neg)
 
-        # Split into GNE ordering θ_i = [U_{-i}; x_0]:
+        # GNE ordering θ_i = [U_{-i}; x_0]:
         F_i       = H_par_full[:, :nx]    # (n_u_i, nx) — cost from x_0 = p
         F_cross_i = H_par_full[:, nx:]    # (n_u_i, n_u_neg) — cost from U_{-i}
 
@@ -228,39 +236,57 @@ def make_gne_game_from_plant(
         b_loc = np.concatenate([u_ub_rep, -u_lb_rep])         # (2*n_u_i,)
         S_loc = np.zeros((2 * n_u_i, nx))                     # no p-dependence
 
-        # ── state constraint data (for mp_solver to build G/F matrices) ─────
-        # State constraints:  x_lb_rep ≤ X ≤ x_ub_rep
-        #   X = Phi_x p + Gamma_i U_i + Σ_{j≠i} Gamma_j U_j
-        # Rearranged for agent i's constraints in θ_i = [U_{-i}; p]:
-        #   ±Gamma_i U_i ≤ ±x_{ub/lb}_rep ∓ M_theta θ_i
-        # where M_theta = [Phi_x | Gamma_{j1} | ...]
-        Gamma_self = Gamma_i.copy()
-        M_theta_i  = M_theta_dimpc.copy()  # (Np*nx, nx + n_u_neg)
-        x_lb_rep_i = x_lb_rep_global.copy()
-        x_ub_rep_i = x_ub_rep_global.copy()
+        # ── coupling-mode-specific constraint data ────────────────────────────
+        if coupling_mode == "state_bounds":
+            # Generalized Nash: state bounds couple agents through trajectory.
+            # ±Gamma_i U_i ≤ ±x_{ub/lb}_rep ∓ M_theta θ_i
+            agents.append(Agent(
+                index=i,
+                n_x=n_u_i,
+                Q=H_qp_i,
+                c=np.zeros(n_u_i),
+                F=F_i,
+                F_cross=F_cross_i,
+                A_loc=A_loc,
+                b_loc=b_loc,
+                S_loc=S_loc,
+                Gamma_self=Gamma_i.copy(),
+                M_theta=M_theta_dimpc.copy(),
+                x_lb_rep=x_lb_rep_global.copy(),
+                x_ub_rep=x_ub_rep_global.copy(),
+            ))
+        else:  # "l_max"
+            # Aggregate-input coupling: Σ_j u_{j,k} ≤ L_max per step.
+            # C_i = I_Np ⊗ ones(1, nu_i)  so that C_i U_i = sum of u_{i,k} per step.
+            C_i = np.kron(np.eye(Np), np.ones((1, nu_i)))   # (Np, Np*nu_i)
+            agents.append(Agent(
+                index=i,
+                n_x=n_u_i,
+                Q=H_qp_i,
+                c=np.zeros(n_u_i),
+                F=F_i,
+                F_cross=F_cross_i,
+                C=C_i,
+                A_loc=A_loc,
+                b_loc=b_loc,
+                S_loc=S_loc,
+            ))
 
-        agents.append(Agent(
-            index=i,
-            n_x=n_u_i,
-            Q=H_qp_i,
-            c=np.zeros(n_u_i),
-            F=F_i,
-            F_cross=F_cross_i,
-            A_loc=A_loc,
-            b_loc=b_loc,
-            S_loc=S_loc,
-            Gamma_self=Gamma_self,
-            M_theta=M_theta_i,
-            x_lb_rep=x_lb_rep_i,
-            x_ub_rep=x_ub_rep_i,
-        ))
-
-    # ── parameter space: p = x_0 ∈ [x_lb_global, x_ub_global] ───────────────
+    # ── game-level coupling data and parameter space ──────────────────────────
     p_lb = x_lb_global.copy()
     p_ub = x_ub_global.copy()
 
+    if coupling_mode == "l_max":
+        d      = L_max * np.ones(Np)       # (Np,)  one limit per prediction step
+        S_coup = np.zeros((Np, nx))        # RHS does not depend on x_0
+    else:
+        d      = None
+        S_coup = None
+
     return GNEGame(
         agents=agents,
+        d=d,
+        S_coup=S_coup,
         p_lb=p_lb,
         p_ub=p_ub,
     )

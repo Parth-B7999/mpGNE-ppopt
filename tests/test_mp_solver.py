@@ -15,6 +15,8 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from mpgne.game import make_random_game
+from mpgne.plant_gen import make_random_plants
+from mpgne.mpc_builder import make_gne_game_from_plant, default_local_weights
 from mpgne.cr_store import AgentSolution
 from mpgne.mp_solver import (
     build_cost_matrices,
@@ -43,6 +45,28 @@ def game3():
     """N=3, n_x=2, n_p=2, n_coupling=1."""
     return make_random_game(N=3, n_x=2, n_p=2, n_coupling=1,
                             x_bound=5.0, p_bound=5.0, seed=7)
+
+
+@pytest.fixture
+def plant2():
+    """M=2 random plant, Np=3."""
+    return make_random_plants(2, 1, Np=3, seed=11)[0]
+
+
+@pytest.fixture
+def game_state_bounds(plant2):
+    """MPC game with state-bounds coupling (default, ACC 2026)."""
+    Q, R, P = default_local_weights(plant2)
+    return make_gne_game_from_plant(plant2, coupling_mode="state_bounds",
+                                    Q_list=Q, R_list=R, P_list=P)
+
+
+@pytest.fixture
+def game_lmax(plant2):
+    """MPC game with aggregate-input L_max coupling (earlier formulation)."""
+    Q, R, P = default_local_weights(plant2)
+    return make_gne_game_from_plant(plant2, coupling_mode="l_max", L_max=5.0,
+                                    Q_list=Q, R_list=R, P_list=P)
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +322,92 @@ class TestSolveAgentMp:
         assert len(sols) == game3.N
         for s in sols:
             assert s.n_cr >= 1
+
+
+# ---------------------------------------------------------------------------
+# Coupling-mode constraint structure (fast — no PPOPT solve)
+# ---------------------------------------------------------------------------
+
+class TestCouplingModeConstraints:
+    """Verify that build_constraint_matrices produces the right structure
+    for both coupling_mode="state_bounds" and coupling_mode="l_max"."""
+
+    def test_state_bounds_no_coupling_block(self, game_state_bounds):
+        """state_bounds game has n_coupling=0; no coupling rows in G."""
+        assert game_state_bounds.n_coupling == 0
+        for i in range(game_state_bounds.N):
+            ai = game_state_bounds.agents[i]
+            assert ai.C is None
+            assert ai.has_state_constraints
+
+    def test_state_bounds_G_has_state_rows(self, game_state_bounds, plant2):
+        """G must include ±Gamma_i rows for each agent (2*Np*nx rows)."""
+        Np, nx = plant2.Np, plant2.nx
+        for i in range(game_state_bounds.N):
+            ai = game_state_bounds.agents[i]
+            n_loc = ai.n_loc                        # 2*Np*nu_i
+            n_state = 2 * Np * nx                   # ±Gamma_i rows
+            G, b, F = build_constraint_matrices(game_state_bounds, i)
+            assert G.shape[0] == n_loc + n_state
+
+    def test_lmax_has_coupling_block(self, game_lmax, plant2):
+        """l_max game has n_coupling=Np; each agent has C != None."""
+        assert game_lmax.n_coupling == plant2.Np
+        for i in range(game_lmax.N):
+            ai = game_lmax.agents[i]
+            assert ai.C is not None
+            assert not ai.has_state_constraints
+
+    def test_lmax_G_has_coupling_rows(self, game_lmax, plant2):
+        """G must include Np coupling rows (one per prediction step)."""
+        Np = plant2.Np
+        for i in range(game_lmax.N):
+            ai = game_lmax.agents[i]
+            n_loc = ai.n_loc                        # 2*Np*nu_i
+            G, b, F = build_constraint_matrices(game_lmax, i)
+            assert G.shape[0] == n_loc + Np
+
+    def test_lmax_d_shape(self, game_lmax, plant2):
+        """Coupling RHS d must have length Np."""
+        assert game_lmax.d.shape == (plant2.Np,)
+        assert np.all(game_lmax.d == 5.0)          # L_max=5.0 in fixture
+
+    def test_state_bounds_F_has_M_theta_rows(self, game_state_bounds, plant2):
+        """F parametric block for state rows must have shape (2*Np*nx, n_theta)."""
+        Np, nx = plant2.Np, plant2.nx
+        for i in range(game_state_bounds.N):
+            ai = game_state_bounds.agents[i]
+            n_loc = ai.n_loc
+            _, _, F = build_constraint_matrices(game_state_bounds, i)
+            n_state_rows = 2 * Np * nx
+            assert F[n_loc: n_loc + n_state_rows].shape[0] == n_state_rows
+
+    def test_invalid_coupling_mode_raises(self, plant2):
+        Q, R, P = default_local_weights(plant2)
+        with pytest.raises(ValueError, match="coupling_mode"):
+            make_gne_game_from_plant(plant2, coupling_mode="bad",
+                                     Q_list=Q, R_list=R, P_list=P)
+
+
+# ---------------------------------------------------------------------------
+# Full PPOPT solve with plant-based games (slow)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.slow
+class TestSolveAgentMpPlant:
+
+    def test_state_bounds_solves(self, game_state_bounds):
+        """state_bounds MPC game: all agents get at least one CR."""
+        sols = solve_all_agents_mp(game_state_bounds,
+                                   algorithm=mpqp_algorithm.combinatorial,
+                                   verbose=False)
+        assert len(sols) == game_state_bounds.N
+        assert all(s.n_cr >= 1 for s in sols)
+
+    def test_lmax_solves(self, game_lmax):
+        """l_max MPC game: all agents get at least one CR."""
+        sols = solve_all_agents_mp(game_lmax,
+                                   algorithm=mpqp_algorithm.combinatorial,
+                                   verbose=False)
+        assert len(sols) == game_lmax.N
+        assert all(s.n_cr >= 1 for s in sols)

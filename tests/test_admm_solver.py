@@ -412,3 +412,62 @@ class TestAdmmVsExplicit:
                 if np.allclose(res.x_stacked, x_exp, atol=1e-2):
                     matches += 1
         assert matches >= 3, f"Only {matches}/10 grid points matched explicit"
+
+
+# ---------------------------------------------------------------------------
+# ADMM on plant-based MPC games — both coupling modes
+# ---------------------------------------------------------------------------
+
+def _make_mpc_game(coupling_mode: str, L_max: float = 5.0):
+    """Small M=2 MPC game with the requested coupling formulation."""
+    from mpgne.plant_gen import make_random_plants
+    from mpgne.mpc_builder import make_gne_game_from_plant, default_local_weights
+    plant = make_random_plants(2, 1, seed=77)[0]
+    Q, R, P = default_local_weights(plant)
+    game = make_gne_game_from_plant(plant, coupling_mode=coupling_mode, L_max=L_max,
+                                    Q_list=Q, R_list=R, P_list=P)
+    # Return plant too so caller can build a valid p inside state bounds
+    return plant, game
+
+
+class TestAdmmPlantCouplingModes:
+
+    def test_state_bounds_converges(self):
+        """ADMM must converge on a state_bounds MPC game."""
+        plant, game = _make_mpc_game("state_bounds")
+        p = np.concatenate([s.x_lb * 0.1 for s in plant.subsystems])
+        res = admm_solve(game, p, rho=1.0, max_iter=2000, tol=1e-4, verbose=False)
+        assert res.converged, f"ADMM did not converge (state_bounds): {res.n_iter} iters"
+
+    def test_lmax_converges(self):
+        """ADMM must converge on an l_max MPC game."""
+        plant, game = _make_mpc_game("l_max", L_max=5.0)
+        p = np.concatenate([s.x_lb * 0.1 for s in plant.subsystems])
+        res = admm_solve(game, p, rho=1.0, max_iter=2000, tol=1e-4, verbose=False)
+        assert res.converged, f"ADMM did not converge (l_max): {res.n_iter} iters"
+
+    def test_state_bounds_local_constraints_satisfied(self):
+        """All local input-bound constraints are met at the ADMM solution."""
+        plant, game = _make_mpc_game("state_bounds")
+        p = np.concatenate([s.x_lb * 0.05 for s in plant.subsystems])
+        res = admm_solve(game, p, rho=1.0, max_iter=2000, tol=1e-4, verbose=False)
+        for i, ai in enumerate(game.agents):
+            x_i = res.x_sol[i]
+            rhs = ai.b_loc + ai.S_loc @ p
+            assert np.all(ai.A_loc @ x_i <= rhs + 1e-4), \
+                f"Agent {i} violates local constraints (state_bounds)"
+
+    def test_lmax_coupling_satisfied(self):
+        """Aggregate-input coupling Σ C_i x_i ≤ d is met at the ADMM solution."""
+        plant, game = _make_mpc_game("l_max", L_max=5.0)
+        p = np.concatenate([s.x_lb * 0.05 for s in plant.subsystems])
+        res = admm_solve(game, p, rho=1.0, max_iter=2000, tol=1e-4, verbose=False)
+        assert game.coupling_feasible(res.x_stacked, p, tol=1e-3), \
+            "L_max coupling constraint violated at ADMM solution"
+
+    def test_mode_affects_n_coupling(self):
+        """state_bounds → n_coupling=0; l_max → n_coupling=Np."""
+        plant, g_sb = _make_mpc_game("state_bounds")
+        _,     g_lm = _make_mpc_game("l_max")
+        assert g_sb.n_coupling == 0
+        assert g_lm.n_coupling == plant.Np

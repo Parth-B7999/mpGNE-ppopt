@@ -50,7 +50,11 @@ ALGO        = mpqp_algorithm.combinatorial_parallel   # PPOPT mpQP algorithm
 ADMM_RHO    = 0.5        # ADMM penalty parameter (reduced for slower/accurate convergence)
 ADMM_ITERS  = 1000       # max ADMM iterations per step
 ADMM_TOL    = 1e-8       # ADMM convergence tolerance (tightened for paper benchmark)
-# L_MAX coupling constraint removed — state bounds now couple agents
+# Coupling formulation:
+#   "state_bounds" — generalized Nash via x_lb ≤ x_k ≤ x_ub  (default, ACC 2026)
+#   "l_max"        — aggregate-input coupling  Σ_j u_{j,k} ≤ L_MAX  (earlier formulation)
+COUPLING_MODE = "state_bounds"
+L_MAX        = 5.0       # only used when COUPLING_MODE = "l_max"
 FACET_METHOD = "hyperplane"   # "hyperplane" (fast) or "lp" (rigorous)
 
 SEED        = 2025
@@ -350,6 +354,7 @@ def run_one_plant(plant, x0, M, plant_idx):
     try:
         Q_list, R_list, P_list = default_local_weights(plant)
         game = make_gne_game_from_plant(plant,
+                                        coupling_mode=COUPLING_MODE, L_max=L_MAX,
                                         Q_list=Q_list, R_list=R_list, P_list=P_list)
     except Exception as e:
         result["error"] = f"game build: {e}"

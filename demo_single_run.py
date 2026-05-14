@@ -45,6 +45,12 @@ OFFLINE_BFS_MAX_M = 4
 # "slsqp" — scipy SLSQP (no extra install, larger speedup gap vs FACET)
 QP_SOLVER         = "osqp"
 
+# Coupling formulation for the GNE game:
+#   "state_bounds" — generalized Nash via  x_lb ≤ x_k ≤ x_ub  (default, ACC 2026)
+#   "l_max"        — aggregate-input coupling  Σ_j u_{j,k} ≤ L_MAX per step
+COUPLING_MODE     = "state_bounds"
+L_MAX             = 5.0   # only used when COUPLING_MODE = "l_max"
+
 # Neighbor-finding methods to benchmark:
 #   "FACET-H"  — Hyperplane Adjacency (fast offline, over-inclusive neighbor sets)
 #   "FACET-LP" — LP Facet Adjacency   (exact, compact — ACC 2026 paper)
@@ -54,9 +60,16 @@ NB_METHODS = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    print("=" * 60)
+def _run_for_mode(coupling_mode: str, L_max: float) -> None:
+    """Run the full demo pipeline for one coupling formulation."""
+    from mpgne.cr_store import GNESolution
+    import copy
+
+    _coupling_label = f"l_max (L_MAX={L_max})" if coupling_mode == "l_max" else "state_bounds"
+
+    print("\n" + "=" * 60)
     print(f"  Multi-Agent GNE Demo (M = {M})")
+    print(f"  Coupling: {_coupling_label}")
     print("=" * 60)
 
     # ── Generate plant ────────────────────────────────────────────────────────
@@ -64,15 +77,16 @@ if __name__ == "__main__":
     plant = make_random_plants(M, 1, seed=202)[0]
 
     # ── Build game ────────────────────────────────────────────────────────────
-    print(f"[2/5] Building game formulation...")
+    print(f"[2/5] Building game formulation (coupling={coupling_mode})...")
     Q_list, R_list, P_list = default_local_weights(plant)
     game = make_gne_game_from_plant(
         plant,
+        coupling_mode=coupling_mode, L_max=L_max,
         Q_list=Q_list, R_list=R_list, P_list=P_list
     )
 
     # %% ── 3. Offline mpQP Solving ────────────────────────────────────────────
-    ckpt_dir   = os.path.join(_base_path, "checkpoints_demo")
+    ckpt_dir   = os.path.join(_base_path, f"checkpoints_demo_{coupling_mode}")
     os.makedirs(ckpt_dir, exist_ok=True)
     base_ckpt  = os.path.join(ckpt_dir, f"agent_sols_base_M{M}.pkl")
 
@@ -241,12 +255,10 @@ if __name__ == "__main__":
             prev_combo_LP = _seed_combo(p, U_admm, agent_sols_dict["FACET-LP"])
             if k > 0: t_penalty_LP += admm_times[-1]
             
-        combo_LP, U_LP, _ = solve_gne_online(p, prev_combo_LP, agent_sols_dict["FACET-LP"], game)
+        combo_LP, _, _ = solve_gne_online(p, prev_combo_LP, agent_sols_dict["FACET-LP"], game)
         if combo_LP is not None:
-            U_facet_LP    = U_LP
             prev_combo_LP = combo_LP
         else:
-            U_facet_LP     = U_admm.copy()
             flp_fallbacks += 1
             prev_combo_LP  = None
             t_penalty_LP += admm_times[-1]
@@ -324,7 +336,7 @@ if __name__ == "__main__":
     for i in range(plant.nx):
         ax1.plot(np.arange(T_SIM+1), x_traj[:, i], linewidth=1.5)
     ax1.set_ylabel("States $x(k)$", fontsize=12, fontweight='bold', color='white')
-    ax1.set_title(f"Distributed MPC via FACET-GNE (M={M} Agents)",
+    ax1.set_title(f"Distributed MPC via FACET-GNE (M={M} Agents, {_coupling_label})",
                   fontsize=14, fontweight='bold', color='white')
     ax1.grid(True, linestyle="--", alpha=0.7)
     for i in range(M):
@@ -335,8 +347,9 @@ if __name__ == "__main__":
     ax2.set_xlabel("Time step $k$", fontsize=12, fontweight='bold', color='white')
     ax2.grid(True, linestyle="--", alpha=0.7)
     plt.tight_layout()
-    p1 = os.path.join(os.path.dirname(__file__), "demo_trajectory.png")
+    p1 = os.path.join(ckpt_dir, "demo_trajectory.png")
     fig1.savefig(p1, dpi=200, bbox_inches='tight', facecolor=fig1.get_facecolor())
+    plt.close(fig1)
     print(f"Plot saved: {p1}")
 
     # Figure 2: Benchmark (2×2)
@@ -403,12 +416,20 @@ if __name__ == "__main__":
     _style(ax_s, "FACET-H Speedup vs Other Methods", "Comparison", "Speedup (×)")
 
     fig2.suptitle(
-        f"Benchmark: FACET-H vs FACET-LP vs Iterative Solvers  (M={M})",
+        f"Benchmark: FACET-H vs FACET-LP vs Iterative Solvers  (M={M}, {_coupling_label})",
         color='white', fontsize=13, fontweight='bold', y=1.01)
-    p2 = os.path.join(os.path.dirname(__file__), "demo_benchmark.png")
+    p2 = os.path.join(ckpt_dir, "demo_benchmark.png")
     fig2.savefig(p2, dpi=200, bbox_inches='tight', facecolor=fig2.get_facecolor())
+    plt.close(fig2)
     print(f"Plot saved: {p2}")
+    print(f"  -> All outputs in: {ckpt_dir}/")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    modes = [("state_bounds", L_MAX), ("l_max", L_MAX)]
+    for _mode, _lmax in modes:
+        _run_for_mode(_mode, _lmax)
     try:
         plt.show()
     except Exception:

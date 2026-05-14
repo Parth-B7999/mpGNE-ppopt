@@ -236,11 +236,10 @@ def pg_solve(
     tol: float = 1e-6,
     verbose: bool = False,
     qp_solver: str = "osqp",
+    x_init: list[np.ndarray] | None = None,
 ) -> PGResult:
     """
     Solve the GNE for a specific parameter p using Jacobi Best-Response.
-
-    Always cold-starts at x = 0 (no warm-starting).
 
     Parameters
     ----------
@@ -250,7 +249,7 @@ def pg_solve(
     tol       : stopping threshold for ‖x^{k+1} − x^k‖
     verbose   : print per-iteration summary
     qp_solver : "osqp" (default) or "slsqp" — inner QP solver for BR step.
-                Both use cold-start (no warm-starting within the QP solver).
+    x_init    : warm-start list of x_i^0, one per agent.  If None, starts at zeros.
 
     Returns
     -------
@@ -265,8 +264,11 @@ def pg_solve(
     p = np.asarray(p, dtype=float).ravel()
     N = game.N
 
-    # Cold-start: all zeros
-    x_list: list[np.ndarray] = [np.zeros(game.agents[i].n_x) for i in range(N)]
+    # Warm-start from previous solution or cold-start at zeros
+    if x_init is not None and len(x_init) == N:
+        x_list: list[np.ndarray] = [np.asarray(x, dtype=float).copy() for x in x_init]
+    else:
+        x_list: list[np.ndarray] = [np.zeros(game.agents[i].n_x) for i in range(N)]
 
     conv_hist: list[float] = []
     converged = False

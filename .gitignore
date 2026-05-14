@@ -23,6 +23,10 @@ var/
 checkpoints_demo/
 checkpoints_gne/
 tests/full_case_study_data/
+tests/full_case_study_data_l_max/
+tests/full_case_study_data_l_max_36runs_2026_05_13/
+tests/full_case_study_data_state_bounds/
+tests/bench_state_bounds_ckpt/
 graphify-out/
 demo_trajectory.png
 demo_benchmark.png

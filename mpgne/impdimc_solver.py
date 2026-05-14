@@ -131,6 +131,7 @@ def impdimc_solve(
     max_iter: int = 200,
     tol: float = 1e-4,
     verbose: bool = False,
+    U_init: np.ndarray | None = None,
 ) -> IMPDiMPCResult:
     """
     Solve the GNE for parameter p using ImpGNE (plain Jacobi, no Wegstein).
@@ -149,6 +150,9 @@ def impdimc_solve(
     max_iter   : maximum Jacobi iterations
     tol        : convergence threshold  ‖U_bar^{p+1} − U_bar^p‖ < tol
     verbose    : print per-iteration info
+    U_init     : warm-start vector (n_total,) — previous step's U_bar.
+                 Matches paper Eq. (13): assemble U^(0)(k) from U(k-1).
+                 If None, cold-starts at zeros.
 
     Returns
     -------
@@ -161,8 +165,11 @@ def impdimc_solve(
     n_total  = sum(n_x_list)
     offsets  = np.concatenate([[0], np.cumsum(n_x_list)])
 
-    # ── Cold-start at zeros ───────────────────────────────────────────────────
-    U_bar = np.zeros(n_total)
+    # ── Warm-start (paper Eq. 13) or cold-start at zeros ─────────────────────
+    if U_init is not None and len(U_init) == n_total:
+        U_bar = np.asarray(U_init, dtype=float).ravel().copy()
+    else:
+        U_bar = np.zeros(n_total)
 
     conv_hist:  list[float] = []
     converged  = False
@@ -189,6 +196,10 @@ def impdimc_solve(
             U_new_parts.append(U_i_new)
 
         U_bar_new = np.concatenate(U_new_parts)
+
+        # ── Fix 1: divergence guard — stop before overflow propagates ─────────
+        if not np.all(np.isfinite(U_bar_new)) or np.linalg.norm(U_bar_new) > 1e8:
+            break
 
         # ── Convergence ───────────────────────────────────────────────────────
         delta = float(np.linalg.norm(U_bar_new - U_bar))
